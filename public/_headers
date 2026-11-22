@@ -1,0 +1,71 @@
+# Cloudflare Pages headers for GoLinux.
+#
+# Rules are applied in file order. A later block that sets the same header
+# REPLACES the earlier one only if the earlier one is detached with "!";
+# otherwise the values are joined and conflicting directives break caching.
+# The narrow rules below therefore come after the broad ones.
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  X-Frame-Options: DENY
+  # The service worker and the app shell must be revalidated every visit, or a
+  # deploy will not be picked up until the browser cache expires.
+  Cache-Control: public, max-age=0, must-revalidate
+
+# The service worker itself must never be cached, or clients keep an old worker.
+/sw.js
+  Cache-Control: no-cache, no-store, must-revalidate
+
+# Build id must never be cached: it is how the page notices that the shipped
+# image changed and a saved user state is no longer compatible.
+/images/build-id.json
+  Cache-Control: no-store
+
+# The snapshot is content-addressed by its name in the manifest and changes only
+# on a rebuild, but it is large: let the browser keep it for a short time and
+# the edge revalidate, so a rebuild ships promptly.
+/images/debian-state.bin.zst
+  Cache-Control: public, max-age=3600
+  Content-Type: application/zstd
+
+# v86 reads this as a byte stream; the type must be exact or instantiate fails.
+/assets/v86/v86.wasm
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Type: application/wasm
+
+/assets/v86/v86-fallback.wasm
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Type: application/wasm
+
+# Vendored libraries: safe to pin forever only because the filenames carry the
+# version in this project's layout. If they are ever upgraded in place, bump
+# PL_VERSION in packs-config.js or rename them.
+/assets/v86/libv86.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/assets/xterm/xterm.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/assets/xterm/xterm.css
+  Cache-Control: public, max-age=31536000, immutable
+
+/assets/bios/*
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Type: application/octet-stream
+
+# Kernel and initrd are only used for the cold-boot fallback; they change only
+# when the image is rebuilt.
+/images/debian-bzImage
+  Cache-Control: public, max-age=86400
+  Content-Type: application/octet-stream
+
+/images/debian-initrd
+  Cache-Control: public, max-age=86400
+  Content-Type: application/octet-stream
+
+# Packs live on R2, but keep these rules here too so a single-origin deploy of
+# the whole tree behaves identically.
+/packs/*
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Type: application/json

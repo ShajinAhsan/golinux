@@ -1,0 +1,156 @@
+#!/usr/bin/env node
+// Fail loudly if the generated manifests no longer match the files on disk.
+//
+// Called at the end of build.sh and build-snapshot.sh. A stale manifest is the
+// kind of bug that only shows up as a mysterious runtime failure: a snapshot
+// size hint that is wrong, or a pack listing chunks that were renumbered when
+// the disk image was rebuilt.
+//
+// Single sources of truth checked here:
+//   packs/index.json      sizes shown in the UI + snapshotBytes
+//   packs/*.json          chunk lists for the opt-in packs
+//   packs-config.js       the ONE cache version shared by index.html and sw.js
+'use strict';
+
+const fs = require("node:fs");
+const path = require("node:path");
+
+const ROOT = path.join(__dirname, "..", "..");
+const CHUNKS = path.join(ROOT, "images", "debian-chunks");
+const SNAPSHOT = path.join(ROOT, "images", "debian-state.bin.zst");
+const INDEX = path.join(ROOT, "packs", "index.json");
+
+const problems = [];
+const notes = [];
+
+function fail(msg) { problems.push(msg); }
+
+// ---- snapshot size recorded in packs/index.json -------------------------
+if (!fs.existsSync(INDEX)) {
+  fail("packs/index.json is missing — run: node tools/image/build-pack-index.js");
+} else {
+  const index = JSON.parse(fs.readFileSync(INDEX, "utf8"));
+
+  if (fs.existsSync(SNAPSHOT)) {
+    const actual = fs.statSync(SNAPSHOT).size;
+    const recorded = index.minimal && index.minimal.snapshotBytes;
+    if (recorded !== actual) {
+      fail(`snapshot size is stale in packs/index.json: recorded ${recorded}, ` +
+        `actual ${actual}. Run: node tools/image/build-pack-index.js`);
+    } else {
+      notes.push(`snapshot size matches (${actual} bytes)`);
+    }
+  } else {
+    fail("images/debian-state.bin.zst is missing — run tools/image/build-snapshot.sh");
+  }
+
+  // ---- every listed chunk must exist, and sizes must add up -------------
+  const expected = JSON.parse(fs.readFileSync(path.join(ROOT, "packs", "common.json"), "utf8"));
+  const common = index.common;
+  if (common && expected.length !== common.chunks) {
+    fail(`common pack count is stale in packs/index.json: recorded ${common.chunks}, ` +
+      `list has ${expected.length}. Run: node tools/image/build-pack-index.js`);
+  }
+
+  // Every pack file the UI can install must exist, or "Save" silently no-ops.
+  for (const id of ["common", "full"]) {
+    const pf = path.join(ROOT, "packs", id + ".json");
+    if (!fs.existsSync(pf)) {
+      fail(`packs/${id}.json is missing — run: node tools/image/build-packs.js ${id}`);
+    } else if (index[id] && JSON.parse(fs.readFileSync(pf, "utf8")).length !== index[id].chunks) {
+      fail(`packs/${id}.json count differs from packs/index.json — run: node tools/image/build-pack-index.js`);
+    }
+  }
+
+  let missing = 0;
+  for (const name of expected) {
+    if (!fs.existsSync(path.join(CHUNKS, name))) {
+      if (missing < 3) fail(`common pack references a missing chunk: ${name}`);
+      missing++;
+    }
+  }
+  if (missing > 3) fail(`... and ${missing - 3} more missing chunks in packs/common.json`);
+  if (!missing) notes.push(`all ${expected.length} common chunks present`);
+}
+
+// ---- build id must match the files it fingerprints ---------------------
+// A stale build id means users keep restoring states taken against a different
+// disk/snapshot, which is exactly the stale-data bug this guards against.
+try {
+  const { execFileSync } = require("node:child_process");
+  const out = execFileSync(process.execPath,
+    [path.join(ROOT, "tools", "image", "build-id.js"), "--check"],
+    { encoding: "utf8" });
+  notes.push(out.trim());
+} catch (e) {
+  fail("images/build-id.json is stale — run: node tools/image/build-id.js");
+}
+
+// ---- one cache version, in packs-config.js only -------------------------
+// --config lets a deploy check the STAGED copy (build-pages.sh stamps the copy
+// under .deploy-pages/, not the source tree, so the source still has GL_BUILD_ID
+// = "" for local dev).
+const configArg = process.argv.indexOf("--config");
+const configPath = configArg > 0
+  ? path.resolve(process.argv[configArg + 1])
+  : path.join(ROOT, "packs-config.js");
+if (!fs.existsSync(configPath)) {
+  fail("packs-config.js is missing");
+} else {
+  const config = fs.readFileSync(configPath, "utf8");
+  const m = config.match(/const GL_VERSION\s*=\s*"([^"]+)"/);
+  if (!m) {
+    fail("packs-config.js has no GL_VERSION");
+  } else {
+    notes.push(`cache version ${m[1]} (single source: packs-config.js)`);
+  }
+
+  // ---- --deploy: a production build MUST be build-id versioned ----------
+  // Local dev runs with GL_BUILD_ID = "" and flat paths on purpose. A deploy
+  // must never do that, or `immutable` chunk URLs silently change bytes.
+  if (process.argv.includes("--deploy")) {
+    const b = config.match(/^const GL_BUILD_ID\s*=\s*"([^"]*)";/m);
+    if (!b) {
+      fail("packs-config.js has no GL_BUILD_ID line (deploy requires one)");
+    } else if (!b[1]) {
+      fail("GL_BUILD_ID is empty — refusing a deploy with flat, unversioned " +
+        "chunk paths. Run tools/deploy/build-pages.sh, which stamps it.");
+    } else if (/[^0-9a-f]/.test(b[1])) {
+      fail(`GL_BUILD_ID is not lowercase hex: '${b[1]}'`);
+    } else {
+      // It must match the artifacts it names.
+      try {
+        const recorded = JSON.parse(fs.readFileSync(
+          path.join(ROOT, "images", "build-id.json"), "utf8")).buildId;
+        if (recorded !== b[1]) {
+          fail(`GL_BUILD_ID (${b[1]}) does not match images/build-id.json ` +
+            `(${recorded}); chunks would 404. Re-stamp the build id.`);
+        } else {
+          notes.push(`deploy build id ${b[1]} matches artifacts`);
+        }
+      } catch (e) {
+        fail("images/build-id.json is unreadable; cannot verify GL_BUILD_ID");
+      }
+    }
+  }
+}
+
+// Catch a cache name hardcoded somewhere else, which would silently drift.
+for (const f of ["index.html", "sw.js"]) {
+  const p = path.join(ROOT, f);
+  if (!fs.existsSync(p)) continue;
+  const src = fs.readFileSync(p, "utf8");
+  // Guard against a cache name being hardcoded instead of built from GL_VERSION.
+  if (/golinux-(shell|data|pack)-v\d/.test(src)) {
+    fail(`${f} hardcodes a cache name; use GL_SHELL_CACHE / GL_DATA_CACHE / ` +
+      `GL_PACK_CACHE from packs-config.js`);
+  }
+}
+
+if (problems.length) {
+  console.error("\nMANIFEST CHECK FAILED:");
+  for (const p of problems) console.error("  - " + p);
+  process.exit(1);
+}
+
+console.log("manifest check ok: " + notes.join("; "));

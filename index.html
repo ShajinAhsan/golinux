@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoLinux</title>
+<meta name="theme-color" content="#0b0d10">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="assets/xterm/xterm.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d10; color: #c7ccd1; font: 13px/1.4 ui-monospace, monospace; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+  #bar { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid #1d2126; flex-wrap: wrap; }
+  #bar b { color: #e8ecef; font-weight: 600; }
+  #status { color: #6f7a85; }
+  button { background: #171b20; color: #c7ccd1; border: 1px solid #2a3037; border-radius: 4px; padding: 4px 9px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #3d454e; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  /* Fill the window. min-height:0 lets the flex child shrink so the terminal
+     scrolls internally instead of growing the page; without it a tall terminal
+     pushes the key bar off-screen and the prompt out of view. */
+  #terminal {
+    flex: 1 1 auto; min-height: 0; padding: 6px 8px;
+    overflow: hidden; position: relative;
+  }
+  /* xterm sizes itself from the container; make it inherit the box exactly. */
+  #terminal .xterm, #terminal .xterm-viewport, #terminal .xterm-screen {
+    height: 100% !important;
+  }
+
+  .bar { display: none; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid #1d2126; background: #101317; }
+  .bar.visible { display: flex; }
+  .bar .label { color: #8b95a1; white-space: nowrap; }
+  .bar .track { flex: 1; height: 6px; background: #1d2126; border-radius: 3px; overflow: hidden; min-width: 80px; }
+  .bar .fill { height: 100%; width: 0%; background: #7ee787; transition: width 0.15s linear; }
+  .bar .pct { color: #7ee787; min-width: 9em; text-align: right; }
+
+  #packs {
+    position: fixed; inset: 0; background: rgba(5, 7, 9, 0.72);
+    display: none; align-items: center; justify-content: center; z-index: 10;
+  }
+  #packs.visible { display: flex; }
+  #packsBox {
+    background: #101317; border: 1px solid #262c33; border-radius: 8px;
+    width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 64px);
+    overflow: auto; padding: 16px 18px 14px;
+  }
+  #packsBox h2 { margin: 0 0 4px; font-size: 14px; color: #e8ecef; }
+  #packsBox p.hint { margin: 0 0 12px; color: #77828d; font-size: 12px; }
+  .pack {
+    display: flex; gap: 10px; align-items: flex-start;
+    border: 1px solid #222830; border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;
+  }
+  .pack.installed { border-color: #2d6a3a; background: #0f1613; }
+  .pack .meta { flex: 1; min-width: 0; }
+  .pack .meta strong { color: #dfe5ea; }
+  .pack .meta .size { color: #7ee787; margin-left: 6px; }
+  .pack .meta .desc { color: #77828d; font-size: 12px; margin-top: 3px; }
+  .pack .meta .badge { color: #7ee787; font-size: 11px; margin-left: 6px; }
+  .pack .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  #packStatus { margin-top: 10px; font-size: 12px; color: #8b95a1; min-height: 1.2em; }
+  #packsFooter { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; gap: 8px; }
+  #saveDataNote { font-size: 12px; color: #d0a24a; margin: 0 0 10px; display: none; }
+  #saveDataNote.visible { display: block; }
+
+  /* Fatal error panel: replaces a hang with something the user can act on. */
+  #fatal {
+    display: none; position: fixed; inset: 0; z-index: 40;
+    background: rgba(5,7,9,.94); align-items: center; justify-content: center; padding: 24px;
+  }
+  #fatal.visible { display: flex; }
+  #fatal .box {
+    max-width: 520px; border: 1px solid #6b3030; border-radius: 8px;
+    background: #150d0d; padding: 20px 22px;
+  }
+  #fatal .fatal-title { color: #ff9f9f; font-weight: 600; margin-bottom: 8px; }
+  #fatal .fatal-detail { color: #c7ccd1; line-height: 1.5; font-size: 13px; }
+  #fatal .fatal-hint { color: #77828d; font-size: 12px; margin-top: 12px; }
+  #fatal .fatal-hint button { margin-top: 10px; }
+
+  /* Loading overlay: says which phase we are in, so a slow first visit does
+     not look like a frozen page. */
+  #loading {
+    position: absolute; inset: 0; z-index: 5;
+    display: none; flex-direction: column; gap: 10px;
+    align-items: center; justify-content: center;
+    background: #0b0d10; color: #8b95a1; padding: 24px; text-align: center;
+  }
+  #loading.visible { display: flex; }
+  #loading .title { color: #dfe5ea; font-size: 14px; }
+  #loading .detail { font-size: 12px; max-width: 420px; line-height: 1.5; }
+  #loading .spin {
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 2px solid #262c33; border-top-color: #7ee787;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* On-screen key bar (touch devices) */
+  #keybar {
+    display: none; gap: 4px; padding: 6px; border-top: 1px solid #1d2126;
+    background: #0e1114;
+    /* Wrap rather than scroll: on a narrow phone every key must be reachable
+       without a horizontal swipe that also scrolls the terminal. */
+    flex-wrap: wrap;
+  }
+  #keybar.visible { display: flex; }
+  #keybar button {
+    min-width: 40px; padding: 7px 8px; font-size: 12px;
+    background: #171b20; border: 1px solid #2a3037; border-radius: 4px;
+    white-space: nowrap; touch-action: manipulation;
+  }
+  #keybar button:active { background: #22282f; border-color: #3d454e; }
+  #keybar .spacer { flex: 1; }
+
+  @media (max-width: 640px) {
+    #bar { padding: 6px 8px; font-size: 12px; gap: 6px; }
+    #bar b { font-size: 12px; }
+    #terminal { padding: 4px 6px; }
+    #keybar { padding: 4px; gap: 3px; }
+    #keybar button { min-width: 0; flex: 1 1 auto; padding: 7px 5px; font-size: 11px; }
+  }
+
+  /* Use the dynamic viewport height where supported: on mobile browsers 100vh
+     includes the area behind the on-screen keyboard, which is what pushes the
+     prompt out of view. */
+  @supports (height: 100dvh) {
+    html, body { height: 100dvh; }
+  }
+
+  #offlineBanner {
+    display: none; align-items: center; gap: 10px;
+    padding: 7px 10px; background: #3a2a10; border-bottom: 1px solid #6b4d16;
+    color: #f0c674; font-size: 12px;
+  }
+  #offlineBanner.visible { display: flex; }
+  #offlineBanner .grow { flex: 1; }
+
+  #persistStatus { font-size: 12px; }
+  #persistStatus.ok { color: #7ee787; }
+  #persistStatus.warn { color: #f0c674; }
+  #persistStatus.error { color: #ff8f8f; }
+  #offlineBanner button { padding: 3px 8px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <b>GoLinux</b>
+    <span id="status">booting…</span>
+    <button id="restart">Restart</button>
+    <button id="openPacks">Save for offline use</button>
+    <button id="uploadBtn" title="Send a file into the guest (max 50 MB)">Upload</button>
+    <button id="downloadBtn" title="Download /root as a zip">Download /root</button>
+    <button id="resetBtn" title="Discard saved session and start fresh">Reset</button>
+    <a id="aboutLink" href="about.html" style="color:#8b95a1;font-size:12px;text-decoration:none;padding:4px 2px;">About</a>
+    <input type="file" id="uploadInput" multiple hidden>
+    <span id="persistStatus"></span>
+  </div>
+
+  <div id="progress" class="bar" aria-live="polite">
+    <span class="label">Downloading snapshot</span>
+    <div class="track"><div class="fill" id="progressFill"></div></div>
+    <span class="pct" id="progressPct">0%</span>
+  </div>
+
+  <div id="packProgress" class="bar" aria-live="polite">
+    <span class="label" id="packProgressLabel">Downloading pack</span>
+    <div class="track"><div class="fill" id="packProgressFill"></div></div>
+    <span class="pct" id="packProgressPct"></span>
+    <button id="packPause">Pause</button>
+    <button id="packCancel">Cancel</button>
+  </div>
+
+  <div id="offlineBanner" role="status">
+    <span class="grow">
+      You are offline and some disk data is not cached — programs you have not
+      run yet may fail. Install an offline pack to fix this.
+    </span>
+    <button id="offlineBannerOpen">Save for offline use</button>
+    <button id="offlineBannerDismiss" aria-label="Dismiss">Dismiss</button>
+  </div>
+
+  <div id="packs" role="dialog" aria-modal="true" aria-labelledby="packsTitle">
+    <div id="packsBox">
+      <h2 id="packsTitle">Save for offline use</h2>
+      <p class="hint">
+        GoLinux always works offline for anything already cached. Pick a
+        pack to cache more of the disk now, so more commands keep working with
+        no network.
+      </p>
+      <p id="saveDataNote">
+        Save-Data is on or your connection looks slow, so packs are not
+        suggested automatically. You can still install one below.
+      </p>
+
+      <div class="pack" data-pack="minimal">
+        <div class="meta">
+          <strong>Minimal</strong><span class="size" data-size="minimal"></span>
+          <span class="badge" data-badge="minimal"></span>
+          <div class="desc">Snapshot only — boots instantly. The default.</div>
+        </div>
+        <div class="actions">
+          <button data-install="minimal">Use</button>
+        </div>
+      </div>
+
+      <div class="pack" data-pack="common">
+        <div class="meta">
+          <strong>Common tools</strong><span class="size" data-size="common"></span>
+          <span class="badge" data-badge="common"></span>
+          <div class="desc">ls, nano, git, gcc, g++, make, man and their dependencies.</div>
+        </div>
+        <div class="actions">
+          <button data-install="common">Save</button>
+          <button data-remove="common">Remove</button>
+        </div>
+      </div>
+
+      <div class="pack" data-pack="full">
+        <div class="meta">
+          <strong>Full disk</strong><span class="size" data-size="full"></span>
+          <span class="badge" data-badge="full"></span>
+          <div class="desc">Every data chunk of the disk image. Nothing left to fetch.</div>
+        </div>
+        <div class="actions">
+          <button data-install="full">Save</button>
+          <button data-remove="full">Remove</button>
+        </div>
+      </div>
+
+      <div id="packStatus"></div>
+
+      <div id="packsFooter">
+        <span id="packQuota" style="font-size:12px;color:#77828d"></span>
+        <button id="closePacks">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="terminal"></div>
+
+  <div id="loading" aria-live="polite">
+    <div class="spin"></div>
+    <div class="title" id="loadingTitle">Starting…</div>
+    <div class="detail" id="loadingDetail"></div>
+  </div>
+
+  <div id="keybar" aria-label="On-screen keys">
+    <button data-key="esc" aria-label="Escape">Esc</button>
+    <button data-key="tab" aria-label="Tab">Tab</button>
+    <button data-key="ctrl" aria-label="Control">Ctrl</button>
+    <button data-key="alt" aria-label="Alt">Alt</button>
+    <button data-key="left" aria-label="Left arrow">←</button>
+    <button data-key="up" aria-label="Up arrow">↑</button>
+    <button data-key="down" aria-label="Down arrow">↓</button>
+    <button data-key="right" aria-label="Right arrow">→</button>
+    <button data-sym="|">|</button>
+    <button data-sym="/">/</button>
+    <button data-sym="~">~</button>
+    <button data-sym="-">-</button>
+    <button data-sym="_">_</button>
+  </div>
+
+  <div id="fatal" role="alertdialog" aria-labelledby="fatalTitle">
+    <div class="box">
+      <div class="fatal-title" id="fatalTitle">Cannot start</div>
+      <div class="fatal-detail"></div>
+      <div class="fatal-hint">
+        If this keeps happening, try a normal (non-private) window with
+        service workers enabled, then reload.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="packs-config.js"></script>
+<script src="packs.js"></script>
+<script src="persist.js"></script>
+<script src="persist-9p.js"></script>
+<script src="assets/xterm/xterm.js"></script>
+<script src="assets/xterm/addon-fit.js"></script>
+<script src="assets/v86/libv86.js"></script>
+<script>
+const statusEl = document.getElementById("status");
+const progressEl = document.getElementById("progress");
+const progressFill = document.getElementById("progressFill");
+const progressPct = document.getElementById("progressPct");
+const bootStart = performance.now();
+
+// A state image stores guest RAM, so memory_size must match the value the
+// snapshot was taken with. Keep in sync with tools/image/build-snapshot.sh.
+const MEMORY_SIZE = 256 * 1024 * 1024;
+
+const disk = {
+  // Same-origin path on purpose: see GL_CHUNK_PATH in packs-config.js and the
+  // note there about v86's use_parts filename construction. The service worker
+  // forwards these to the asset origin.
+  url: "/" + GL_CHUNK_PATH + "chunk.zst",
+  async: true,
+  use_parts: true,
+  fixed_chunk_size: 128 * 1024,
+  size: 5 * 1024 * 1024 * 1024,
+};
+
+/* ---------- first-load snapshot progress ---------- */
+
+function mb(n) { return (n / 1048576).toFixed(1); }
+
+function showProgress(loaded, total) {
+  progressEl.classList.add("visible");
+  const pct = total ? Math.min(100, (loaded / total) * 100) : 0;
+  progressFill.style.width = pct.toFixed(1) + "%";
+  progressPct.textContent = total
+    ? `${mb(loaded)}/${mb(total)} MB`
+    : `${mb(loaded)} MB`;
+}
+function hideProgress() { progressEl.classList.remove("visible"); }
+
+// Is the snapshot already cached? Asked through the Cache API directly so it
+// works on the very first visit, when no service worker controls the page yet.
+async function snapshotIsCached() {
+  for (const name of [GL_DATA_CACHE, GL_SHELL_CACHE]) {
+    try {
+      const c = await caches.open(name);
+      if (await c.match(GL_SNAPSHOT_URL, { ignoreSearch: true })) return true;
+    } catch (e) { /* Cache API unavailable */ }
+  }
+  return false;
+}
+
+async function snapshotAvailable(url) {
+  try {
+    const r = await fetch(url, { method: "HEAD" });
+    return r.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Fetch the snapshot with progress and hand the bytes to v86 as a buffer, so
+ * it is not downloaded twice. Without this, v86's XHR would fetch it opaquely.
+ */
+async function fetchSnapshotWithProgress(url, onProgress) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("snapshot fetch failed: " + res.status);
+
+  const total = Number(res.headers.get("Content-Length")) || 0;
+  if (!res.body || !res.body.getReader) {
+    const buf = await res.arrayBuffer();
+    onProgress(buf.byteLength, buf.byteLength);
+    return buf;
+  }
+
+  const reader = res.body.getReader();
+  const parts = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    loaded += value.byteLength;
+    onProgress(loaded, total || loaded);
+  }
+
+  const out = new Uint8Array(loaded);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.byteLength; }
+  return out.buffer;
+}
+
+/** Store the snapshot in the data cache, from the page. */
+async function cacheSnapshot(buffer) {
+  try {
+    const cache = await caches.open(GL_DATA_CACHE);
+    await cache.put(GL_SNAPSHOT_URL, new Response(buffer, {
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(buffer.byteLength),
+      },
+    }));
+  } catch (e) {
+    console.warn("could not cache snapshot:", e);
+  }
+}
+
+/* ---------- offline packs UI ---------- */
+
+const packsEl = document.getElementById("packs");
+const packStatusEl = document.getElementById("packStatus");
+const packProgressEl = document.getElementById("packProgress");
+const packProgressFill = document.getElementById("packProgressFill");
+const packProgressPct = document.getElementById("packProgressPct");
+const packProgressLabel = document.getElementById("packProgressLabel");
+const packPauseBtn = document.getElementById("packPause");
+const packCancelBtn = document.getElementById("packCancel");
+
+// Save-Data or a slow connection: do not suggest packs automatically.
+function networkSaysFrugal() {
+  const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (!c) return false;
+  if (c.saveData) return true;
+  return /^(slow-2g|2g|3g)$/.test(c.effectiveType || "");
+}
+
+function fmt(bytes) {
+  if (!bytes) return "";
+  if (bytes >= 1048576) return mb(bytes) + " MB";
+  return Math.round(bytes / 1024) + " KB";
+}
+
+let packManifest = {};
+
+function renderPacks(installed) {
+  for (const id of ["minimal", "common", "full"]) {
+    const sizeEl = document.querySelector(`[data-size="${id}"]`);
+    const badgeEl = document.querySelector(`[data-badge="${id}"]`);
+    const row = document.querySelector(`.pack[data-pack="${id}"]`);
+    const info = packManifest[id];
+    if (sizeEl && info) {
+      sizeEl.textContent = id === "minimal"
+        ? fmt(info.totalBytes)
+        : `${fmt(info.bytes)} · ${fmt(info.totalBytes)} total`;
+    }
+    if (badgeEl) badgeEl.textContent = installed === id ? "· installed" : "";
+    if (row) row.classList.toggle("installed", installed === id);
+  }
+  document.getElementById("saveDataNote").classList.toggle("visible", networkSaysFrugal());
+  showQuota();
+}
+
+async function showQuota() {
+  const el = document.getElementById("packQuota");
+  try {
+    const est = await navigator.storage.estimate();
+    el.textContent = `using ${fmt(est.usage)} of ${fmt(est.quota)} available`;
+  } catch (e) {
+    el.textContent = "";
+  }
+}
+
+function renderPackProgress(s) {
+  if (!s.running) {
+    packProgressEl.classList.remove("visible");
+    return;
+  }
+  packProgressEl.classList.add("visible");
+  const pct = s.total ? (s.done / s.total) * 100 : 0;
+  packProgressFill.style.width = pct.toFixed(1) + "%";
+  packProgressLabel.textContent = `${s.paused ? "Paused" : "Downloading"} ${s.packId} pack`;
+  packProgressPct.textContent = `${s.done}/${s.total} · ${fmt(s.loaded)}`;
+  packPauseBtn.textContent = s.paused ? "Resume" : "Pause";
+}
+
+GoPacks.onUpdate(async s => {
+  renderPackProgress(s);
+  if (!s.running) {
+    renderPacks(GoPacks.installedPack());
+    if (s.cancelled) {
+      packStatusEl.textContent = "Cancelled. Chunks already saved were kept.";
+    } else if (s.total && s.done >= s.total) {
+      packStatusEl.textContent = `Saved ${s.packId} pack.`;
+    }
+  }
+});
+
+document.getElementById("openPacks").onclick = async () => {
+  packsEl.classList.add("visible");
+  packManifest = await GoPacks.loadManifest();
+  renderPacks(GoPacks.installedPack());
+};
+
+document.getElementById("closePacks").onclick = () => packsEl.classList.remove("visible");
+packsEl.addEventListener("click", e => {
+  if (e.target === packsEl) packsEl.classList.remove("visible");
+});
+
+packsEl.addEventListener("click", async e => {
+  const t = e.target;
+  const installId = t.getAttribute && t.getAttribute("data-install");
+  const removeId = t.getAttribute && t.getAttribute("data-remove");
+  if (!installId && !removeId) return;
+
+  packStatusEl.textContent = "";
+  if (installId) {
+    await GoPacks.install(installId);
+  } else {
+    await GoPacks.removePack(removeId);
+    packStatusEl.textContent = `Removed ${removeId} pack.`;
+  }
+});
+
+packPauseBtn.onclick = () => {
+  if (GoPacks.getState().paused) GoPacks.resume();
+  else GoPacks.pause();
+};
+packCancelBtn.onclick = () => GoPacks.cancel();
+
+/* ---------- offline banner ----------
+ * Shown when the guest asks for a disk chunk that is neither cached nor
+ * reachable. The service worker falls back to an empty chunk so nothing hangs,
+ * but the program then fails, and the user should be told why.
+ */
+
+const offlineBanner = document.getElementById("offlineBanner");
+let bannerDismissed = false;
+
+function showOfflineBanner() {
+  if (bannerDismissed) return;
+  offlineBanner.classList.add("visible");
+}
+
+document.getElementById("offlineBannerDismiss").onclick = () => {
+  bannerDismissed = true;
+  offlineBanner.classList.remove("visible");
+};
+document.getElementById("offlineBannerOpen").onclick = () => {
+  document.getElementById("openPacks").click();
+};
+
+// The service worker reports every chunk it had to substitute and could not
+// fetch. That is the only reliable signal: navigator.onLine is often true even
+// when nothing is reachable.
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", e => {
+    if (e.data && e.data.type === "chunk-miss") showOfflineBanner();
+
+    // A REAL data chunk could not be fetched. Substituting zeros here would
+    // corrupt the guest, so the service worker refuses and we tell the user the
+    // truth: their cached copy is from a different build (or a chunk is
+    // genuinely missing) and a reload picks up the current build.
+    if (e.data && e.data.type === "chunk-missing-real") {
+      showFatal(
+        "This version is out of date",
+        "The disk data for this build could not be loaded (missing chunk " +
+        (e.data.name || "") + "). Reload the page to fetch the current version. " +
+        "Your files are saved separately and are not affected.");
+      statusEl.textContent = "outdated";
+      clearLoading();
+      // Stop the guest: continuing would run on partially-missing disk data.
+      try { window.emulator && window.emulator.stop(); } catch (e) {}
+    }
+  });
+}
+
+// Also react if the browser itself knows it is offline.
+window.addEventListener("offline", () => {
+  if (!GoPacks.installedPack || GoPacks.installedPack() === "minimal") {
+    showOfflineBanner();
+  }
+});
+
+/* ---------- persistence ---------- */
+
+const persistStatusEl = document.getElementById("persistStatus");
+
+GoPersist.setStatusHandler((msg, kind) => {
+  persistStatusEl.textContent = msg;
+  persistStatusEl.className = kind || "";
+});
+
+document.getElementById("resetBtn").onclick = async () => {
+  const ok = confirm(
+    "Reset to a fresh machine?\n\n" +
+    "This permanently deletes your saved files and session on this device. " +
+    "The page will reload with a clean Debian install.");
+  if (!ok) return;
+
+  await GoPersist.clearUserState();
+  // Drop any in-flight autosave target too, then reload from the shipped snapshot.
+  location.reload();
+};
+
+/* ---------- boot ---------- */
+
+async function bootMachine() {
+  // Keep the origin's data from being evicted under storage pressure.
+  if (navigator.storage && navigator.storage.persist) {
+    navigator.storage.persist().then(g => { window.__persisted = g; });
+  }
+
+  // Claim the persistence lock before booting, so only one tab autosaves.
+  await GoPersist.claimOwnership();
+
+  // ?nosnapshot forces the cold-boot path (useful for comparing boot times).
+  const forcedOff = new URLSearchParams(location.search).has("nosnapshot");
+
+  // A saved user session, if any and if it matches this build, wins over the
+  // shipped snapshot: it already contains the disk changes in its IDE cache.
+  let userState = null;
+  if (!forcedOff) {
+    setLoading("Restoring your session",
+      "Loading the machine state saved in this browser.");
+    statusEl.textContent = "restoring…";
+    userState = await GoPersist.loadUserState();
+    if (!userState) {
+      setLoading("Starting a fresh machine",
+        "No saved session for this build, so the shipped snapshot is used.");
+    }
+  }
+
+  const haveSnapshot = !forcedOff && await snapshotAvailable(GL_SNAPSHOT_URL);
+  if (!userState) statusEl.textContent = haveSnapshot ? "restoring…" : "booting…";
+
+  let initialState = null;
+  if (userState) {
+    initialState = { buffer: userState };
+    window.__usedUserState = true;
+  } else if (haveSnapshot) {
+    const cached = await snapshotIsCached();
+    if (!cached) {
+      setLoading("Downloading the machine",
+        "About 10 MB the first time. It is cached afterwards.");
+      showProgress(0, 0);
+    } else {
+      setLoading("Starting…", "Restoring the shipped snapshot.");
+    }
+
+    try {
+      const buf = await fetchSnapshotWithProgress(GL_SNAPSHOT_URL, (l, t) => {
+        if (!cached) showProgress(l, t);
+      });
+      initialState = { buffer: buf };
+      if (!cached) await cacheSnapshot(buf);
+    } catch (e) {
+      statusEl.textContent = "snapshot failed: " + e.message;
+    }
+    hideProgress();
+  }
+
+  const options = {
+    wasm_path: "assets/v86/v86.wasm",
+    bios:     { url: "assets/bios/seabios.bin" },
+    vga_bios: { url: "assets/bios/vgabios.bin" },
+    hda: disk,
+    // The 9p filesystem carries uploads and downloads. It is part of the
+    // snapshot, so it must be requested here too or the device is missing.
+    filesystem: {},
+    memory_size: MEMORY_SIZE,
+    autostart: true,
+    serial_console: {
+      type: "xtermjs",
+      container: document.getElementById("terminal"),
+      xterm_lib: window.Terminal,
+    },
+  };
+
+  if (initialState) {
+    options.initial_state = initialState;
+  } else {
+    // No snapshot, or it could not be fetched: cold boot from kernel + disk.
+    options.bzimage = { url: "images/debian-bzImage" };
+    options.initrd = { url: "images/debian-initrd" };
+    options.cmdline = "root=/dev/sda rw console=ttyS0";
+  }
+
+  window.__usedSnapshot = !!initialState;
+  window.emulator = new V86(options);
+
+  // Keep uploads out of the saved state (see persist-9p.js). Installed before
+  // anything can call save_state(), so no autosave can capture upload bytes.
+  try {
+    Go9p.install(window.emulator);
+  } catch (e) {
+    console.warn("9p state wrapper not installed:", e.message);
+  }
+
+  window.emulator.add_listener("emulator-loaded", () => {
+    statusEl.textContent = "running";
+    window.__bootMs = Math.round(performance.now() - bootStart);
+    clearLoading();
+
+    // A restored guest does not replay serial output it already sent, and the
+    // terminal starts with no scrollback, so the screen would look blank until
+    // a key is pressed. Nudge the shell to redraw its prompt.
+    // The snapshot restores an already-logged-in shell, so /etc/motd is never
+    // printed by login. Show it once here instead: it carries the offline,
+    // upload-path and persistence notices the user needs on first sight.
+    if (initialState) {
+      window.emulator.serial0_send("clear; cat /etc/motd\n");
+      // Nothing to do here: the saved state already contains an EMPTY 9p tree
+      // (persist-9p.js strips contents AND directory entries before saving), so
+      // /mnt/host lists nothing on restore. Deliberately no guest command is
+      // sent: it would echo into whatever the user is running.
+    }
+
+    // Autosave: on a timer, when the tab is hidden, and on unload. Only the
+    // tab holding the persistence lock does this (see persist.js).
+    GoPersist.attach(window.emulator);
+
+    // v86 has now created the xterm instance; size it to the window.
+    fitSoon();
+  });
+  window.emulator.add_listener("emulator-started", () => { statusEl.textContent = "running"; });
+  window.emulator.add_listener("emulator-stopped", () => { statusEl.textContent = "stopped"; });
+  window.emulator.add_listener("download-error", e => {
+    statusEl.textContent = "download failed: " + e.file_name;
+  });
+
+  document.getElementById("restart").onclick = () => window.emulator.restart();
+}
+
+/* ---------- chunk access without a service worker ----------
+ *
+ * The disk chunks are served through the service worker, which forwards them to
+ * GL_ASSET_BASE. Two things can go wrong and both end in a hang rather than an
+ * error, because v86 treats a failed chunk request as fatal and retries forever:
+ *
+ *   1. First visit: the worker is registered but has not taken control yet, so
+ *      the page's chunk requests go straight to the page origin and 404.
+ *   2. No worker at all (disabled, private mode, or a browser without SWs).
+ *
+ * So: register the worker before booting, wait for it to control the page, and
+ * if that never happens while remote chunks are configured, say so instead of
+ * starting a VM that will freeze.
+ */
+
+const swSupported = "serviceWorker" in navigator && !!navigator.serviceWorker;
+
+function pushAssetBase() {
+  if (swSupported && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({
+      type: "set-asset-base",
+      base: GL_ASSET_BASE,
+    });
+  }
+}
+
+/** Resolves true once a worker controls this page, false on timeout. */
+function waitForWorkerControl(timeoutMs) {
+  if (!swSupported) return Promise.resolve(false);
+  if (navigator.serviceWorker.controller) return Promise.resolve(true);
+
+  return new Promise(resolve => {
+    let settled = false;
+    const done = v => { if (!settled) { settled = true; resolve(v); } };
+
+    navigator.serviceWorker.addEventListener("controllerchange",
+      () => done(true), { once: true });
+
+    // ready resolves when there is an active registration; with
+    // self.skipWaiting() + clients.claim() in the worker, control follows
+    // almost immediately after that.
+    navigator.serviceWorker.ready.then(() => {
+      if (navigator.serviceWorker.controller) done(true);
+    }).catch(() => {});
+
+    setTimeout(() => done(!!navigator.serviceWorker.controller), timeoutMs);
+  });
+}
+
+const loadingEl = document.getElementById("loading");
+const loadingTitleEl = document.getElementById("loadingTitle");
+const loadingDetailEl = document.getElementById("loadingDetail");
+
+function setLoading(title, detail) {
+  if (!loadingEl) return;
+  loadingTitleEl.textContent = title;
+  loadingDetailEl.textContent = detail || "";
+  loadingEl.classList.add("visible");
+}
+function clearLoading() {
+  if (loadingEl) loadingEl.classList.remove("visible");
+}
+
+function showFatal(title, detail) {
+  const el = document.getElementById("fatal");
+  el.querySelector(".fatal-title").textContent = title;
+  el.querySelector(".fatal-detail").textContent = detail;
+  el.classList.add("visible");
+  statusEl.textContent = "cannot start";
+}
+
+async function prepareChunkAccess() {
+  const remoteChunks = !!GL_ASSET_BASE;
+
+  if (!swSupported) {
+    if (remoteChunks) {
+      showFatal(
+        "This browser cannot run GoLinux here",
+        "Its disk data is served cross-origin and needs a service worker to " +
+        "forward the requests, but service workers are unavailable " +
+        "(disabled, or blocked in private browsing).");
+      return false;
+    }
+    return true;   // same-origin chunks work without a worker
+  }
+
+  try {
+    await navigator.serviceWorker.register("sw.js");
+  } catch (e) {
+    console.warn("service worker registration failed:", e);
+  }
+
+  const controlled = await waitForWorkerControl(6000);
+  if (controlled) {
+    pushAssetBase();
+    return true;
+  }
+
+  if (remoteChunks) {
+    showFatal(
+      "Could not start",
+      "The service worker did not take control of the page, and this build " +
+      "loads its disk data from another origin. Reloading usually fixes it.");
+    return false;
+  }
+  return true;
+}
+
+if (swSupported) {
+  navigator.serviceWorker.addEventListener("controllerchange", pushAssetBase);
+}
+
+/* ---------- upload / download ----------
+ *
+ * Both directions go through v86's 9p filesystem, which the snapshot mounts at
+ * /mnt/host in the guest:
+ *   upload   : page -> emulator.create_file() -> guest sees /mnt/host/<name>
+ *   download : guest tars /root into /mnt/host -> page reads it with read_file()
+ *
+ * Verified in v86.d.ts: create_file(file, Uint8Array) and read_file(file) both
+ * exist, and they operate on the HOST side of the 9p share. read_file cannot
+ * read arbitrary guest paths, which is why download asks the guest to build the
+ * archive inside the share first.
+ */
+
+const UPLOAD_LIMIT = 50 * 1024 * 1024;   // 50 MB
+const UPLOAD_DIR = "/mnt/host";
+
+function v86() { return window.emulator; }
+
+function setUploadStatus(msg, kind) {
+  persistStatusEl.textContent = msg;
+  persistStatusEl.className = kind || "";
+}
+
+function humanSize(n) {
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return Math.round(n / 1024) + " KB";
+  return n + " B";
+}
+
+async function uploadFiles(fileList) {
+  const emu = v86();
+  if (!emu) return;
+
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+
+  for (const file of files) {
+    if (file.size > UPLOAD_LIMIT) {
+      setUploadStatus(
+        `"${file.name}" is ${humanSize(file.size)} — the limit is 50 MB.`, "error");
+      continue;
+    }
+
+    try {
+      setUploadStatus(`Uploading ${file.name}…`, "");
+      const data = new Uint8Array(await file.arrayBuffer());
+      // create_file writes into the 9p share; the guest sees it at
+      // /mnt/host/<name> because that is where the share is mounted.
+      await emu.create_file("/" + file.name, data);
+
+      // Tell the guest where it landed, and that the drop zone is temporary:
+      // uploads are deliberately not saved in the browser, so anything worth
+      // keeping must be copied into /root.
+      emu.serial0_send(
+        `echo "Uploaded ${file.name} -> ${UPLOAD_DIR}/${file.name}"; ` +
+        `echo "This folder is temporary: copy it to /root to keep it."\n`);
+      setUploadStatus(
+        `Uploaded ${file.name} — it is in ${UPLOAD_DIR}. ` +
+        `Uploads are temporary; cp it into /root to keep it.`, "ok");
+    } catch (e) {
+      setUploadStatus(`Upload failed: ${e.message || e}`, "error");
+    }
+  }
+}
+
+/**
+ * Ask the guest to tar /root into the 9p share, then read that file back and
+ * hand it to the browser as a download.
+ */
+async function downloadRootAsZip() {
+  const emu = v86();
+  if (!emu) return;
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const name = `root-${stamp}.tar.gz`;
+
+  try {
+    setUploadStatus("Preparing archive…", "");
+
+    // -C / root makes the archive contain ./root/... . The 9p share is the
+    // only place the page can read from, so the tarball is written there,
+    // removed first so a failed run cannot return a stale archive.
+    // Unique name per attempt. A fixed name lets a previous run's archive be
+    // picked up again (which happened: an unmounted share silently returned the
+    // old file and reported success). A per-run name also means the guest can
+    // clean up nothing and we still never read stale bytes.
+    // Guard rails: refuse to build an archive we cannot hold comfortably in the
+    // page, and give up quickly rather than polling for five minutes.
+    //
+    // Measured peak page heap for a 100 MB archive was ~541-615 MB, i.e. the
+    // blob plus the guest-side copy and the gzip buffers. Mobile browsers are
+    // far tighter, so the cap is lower there.
+    const isMobile = matchMedia("(pointer: coarse)").matches &&
+                     Math.min(screen.width, screen.height) < 820;
+    const DOWNLOAD_LIMIT = isMobile ? 30 * 1024 * 1024    // phones: ~200 MB peak
+                                    : 300 * 1024 * 1024;  // desktop
+    const archive = `__dl-${Date.now()}.tar.gz`;
+    emu.serial0_send(
+      `tar czf ${UPLOAD_DIR}/${archive} -C / root 2>/dev/null; ` +
+      `echo "Download archive ready (${name})"\n`);
+
+    // Poll for the archive rather than guessing a fixed delay: tar on a large
+    // /root can take a while under emulation.
+    // A gzip tar of an empty tree is still ~120 bytes, so only accept something
+    // that is clearly a real archive; otherwise we would upload a stale file.
+    // tar writes the archive incrementally, so a valid gzip header appears long
+    // before the file is complete. Accept it only once its size has stopped
+    // changing between polls, or a large /root is truncated mid-archive.
+    let data = null;
+    let lastSize = -1;
+    let waitedMs = 0;
+    const WAIT_LIMIT_MS = 180000;             // 3 minutes, then give a clear error
+    for (let i = 0; i < 600 && waitedMs < WAIT_LIMIT_MS; i++) {
+      waitedMs = i * 500;
+      await new Promise(r => setTimeout(r, 500));
+      try {
+        const d = await emu.read_file("/" + archive);
+        if (!d || d.byteLength <= 120 || d[0] !== 0x1f || d[1] !== 0x8b) {
+          lastSize = -1;
+          continue;
+        }
+        if (d.byteLength === lastSize) { data = d; break; }   // stable: done
+        lastSize = d.byteLength;
+      } catch (e) {
+        lastSize = -1;                        // not created yet
+      }
+    }
+
+    if (!data) {
+      setUploadStatus(
+        "Download failed: the guest did not produce an archive within 3 minutes. " +
+        "If /root is very large, remove some files and try again.", "error");
+      return;
+    }
+
+    if (data.byteLength > DOWNLOAD_LIMIT) {
+      setUploadStatus(
+        `Download failed: the archive is ${humanSize(data.byteLength)}, over the ` +
+        `${humanSize(DOWNLOAD_LIMIT)} limit${isMobile ? " on this device" : ""}. ` +
+        `Remove large files from /root and retry, or download in parts.`,
+        "error");
+      return;
+    }
+
+    const blob = new Blob([data], { type: "application/gzip" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+    setUploadStatus(`Downloaded ${name} (${humanSize(blob.size)})`, "ok");
+    // Remove this run's archive; the unique name means a leftover one can never
+    // be mistaken for a fresh download.
+    emu.serial0_send(`rm -f ${UPLOAD_DIR}/${archive}\n`);
+  } catch (e) {
+    setUploadStatus(`Download failed: ${e.message || e}`, "error");
+  }
+}
+
+function setupTransferButtons() {
+  const input = document.getElementById("uploadInput");
+
+  document.getElementById("uploadBtn").onclick = () => input.click();
+  input.onchange = async () => {
+    await uploadFiles(input.files);
+    input.value = "";   // allow re-selecting the same file
+  };
+  document.getElementById("downloadBtn").onclick = () => downloadRootAsZip();
+
+  // Drag and drop onto the terminal is the same path as the button.
+  const term = document.getElementById("terminal");
+  term.addEventListener("dragover", e => { e.preventDefault(); });
+  term.addEventListener("drop", async e => {
+    e.preventDefault();
+    if (e.dataTransfer && e.dataTransfer.files.length) {
+      await uploadFiles(e.dataTransfer.files);
+    }
+  });
+}
+
+setupTransferButtons();
+
+/* ---------- terminal fit + on-screen keys ---------- */
+
+// v86 builds the xterm instance itself and exposes it on the serial adapter.
+function currentTerminal() {
+  return window.emulator && window.emulator.serial_adapter &&
+         window.emulator.serial_adapter.term;
+}
+
+let fitAddon = null;
+
+function fitTerminal() {
+  const term = currentTerminal();
+  if (!term) return;
+  try {
+    if (!fitAddon && window.FitAddon) {
+      fitAddon = new window.FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+    }
+    if (fitAddon) {
+      // The container must be laid out; a zero-size box yields NaN dimensions
+      // and the addon silently does nothing.
+      fitAddon.fit();
+    }
+  } catch (e) {
+    console.warn("terminal fit failed:", e);
+  }
+}
+
+// Refit when the window changes, and once after the terminal exists.
+let fitTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(fitTimer);
+  fitTimer = setTimeout(fitTerminal, 120);
+});
+
+function fitSoon() {
+  // Two passes: the first after layout, the second after the font has loaded,
+  // which changes the cell size and therefore the column count.
+  requestAnimationFrame(() => {
+    fitTerminal();
+    requestAnimationFrame(fitTerminal);
+  });
+  setTimeout(fitTerminal, 500);
+}
+
+/* Key bar. Each button sends the exact bytes a real key would produce, so the
+ * guest sees normal terminal input rather than a special protocol. Modifiers
+ * (Ctrl/Alt) latch for one following keypress, like a phone keyboard. */
+
+const KEY_SEQUENCES = {
+  esc: "\x1b",
+  tab: "\t",
+  up: "\x1b[A",
+  down: "\x1b[B",
+  right: "\x1b[C",
+  left: "\x1b[D",
+};
+
+let latchedCtrl = false;
+let latchedAlt = false;
+
+function sendToGuest(str) {
+  if (!window.emulator) return;
+  // serial0_send takes a string; the guest's tty interprets the bytes normally.
+  window.emulator.serial0_send(str);
+  const term = currentTerminal();
+  if (term && term.focus) term.focus();
+}
+
+function applyModifiers(str) {
+  // Ctrl maps an ASCII letter to its control code (a -> \x01).
+  if (latchedCtrl && str.length === 1) {
+    const c = str.toUpperCase().charCodeAt(0);
+    if (c >= 64 && c <= 95) str = String.fromCharCode(c - 64);
+  }
+  if (latchedAlt && str.length === 1) {
+    str = "\x1b" + str;   // Alt = ESC prefix
+  }
+  return str;
+}
+
+function clearLatches() {
+  latchedCtrl = false;
+  latchedAlt = false;
+  for (const b of document.querySelectorAll("#keybar [aria-pressed]")) {
+    b.setAttribute("aria-pressed", "false");
+  }
+}
+
+function setupKeyBar() {
+  const bar = document.getElementById("keybar");
+
+  // Show the bar on touch devices, where there is no hardware Esc/Ctrl.
+  const touch = matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+  if (touch) bar.classList.add("visible");
+
+  bar.addEventListener("click", e => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    e.preventDefault();
+
+    const key = btn.dataset.key;
+    const sym = btn.dataset.sym;
+
+    if (key === "ctrl") {
+      latchedCtrl = !latchedCtrl;
+      btn.setAttribute("aria-pressed", String(latchedCtrl));
+      return;
+    }
+    if (key === "alt") {
+      latchedAlt = !latchedAlt;
+      btn.setAttribute("aria-pressed", String(latchedAlt));
+      return;
+    }
+
+    if (KEY_SEQUENCES[key]) {
+      sendToGuest(applyModifiers(KEY_SEQUENCES[key]));
+      if (key !== "tab" || !latchedCtrl) clearLatches();
+      return;
+    }
+    if (sym) {
+      sendToGuest(applyModifiers(sym));
+      clearLatches();
+    }
+  });
+}
+
+setupKeyBar();
+
+// Nothing starts until chunk access is known to work, so a first visit waits
+// for the worker (a second or two) instead of hanging on 404s.
+prepareChunkAccess().then(ok => {
+  if (!ok) return;
+  bootMachine().then(() => {
+    // The terminal only exists after v86 constructs it.
+    fitSoon();
+  });
+});
+</script>
+</body>
+</html>

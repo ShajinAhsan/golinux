@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About — GoLinux</title>
+<meta name="theme-color" content="#0b0d10">
+<link rel="icon" href="icons/icon-192.png">
+<style>
+  html, body { margin: 0; background: #0b0d10; color: #c7ccd1;
+    font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 20px; color: #e8ecef; margin: 0 0 4px; }
+  .sub { color: #77828d; margin: 0 0 28px; font-size: 13px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+    color: #8b95a1; margin: 32px 0 10px; font-weight: 600; }
+  p { margin: 0 0 12px; }
+  ul { margin: 0 0 12px; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  a { color: #7ee787; }
+  code { font-family: ui-monospace, monospace; font-size: 13px;
+    background: #151a1f; padding: 1px 5px; border-radius: 3px; }
+  .card { border: 1px solid #1d2126; border-radius: 6px; padding: 14px 16px;
+    margin-bottom: 12px; background: #0e1114; }
+  .card strong { color: #dfe5ea; }
+  .lic { color: #77828d; font-size: 12.5px; }
+  footer { margin-top: 36px; padding-top: 16px; border-top: 1px solid #1d2126;
+    color: #6f7a85; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>About GoLinux</h1>
+  <p class="sub">A CLI-only Debian machine, emulated entirely in your browser.</p>
+
+  <h2>What this is</h2>
+  <p>
+    GoLinux boots a 32-bit Debian 12 (bookworm) system inside your browser
+    using v86, an x86 emulator written in WebAssembly. There is no server
+    process: the machine runs on your device. The terminal is xterm.js.
+  </p>
+  <p>
+    Networking is disabled. Your files live in this browser's storage and are
+    never uploaded. They survive reloads and closed tabs; clearing site data or
+    using Reset removes them.
+  </p>
+
+  <h2>Components and licenses</h2>
+
+  <div class="card">
+    <strong>v86</strong> — x86 emulator, WebAssembly <br>
+    <span class="lic">BSD 2-Clause · Copyright (c) 2012, The v86 contributors</span><br>
+    <a href="https://github.com/copy/v86" rel="noopener">github.com/copy/v86</a> ·
+    <a href="https://copy.sh/v86/" rel="noopener">copy.sh/v86</a> ·
+    <a href="https://github.com/copy/v86/blob/master/LICENSE" rel="noopener">license</a>
+  </div>
+
+  <div class="card">
+    <strong>xterm.js</strong> — terminal component <br>
+    <span class="lic">MIT · Copyright (c) 2017-2019, The xterm.js authors;
+      (c) 2014-2016 SourceLair; (c) 2012-2013 Christopher Jeffrey</span><br>
+    <a href="https://xtermjs.org/" rel="noopener">xtermjs.org</a> ·
+    <a href="https://github.com/xtermjs/xterm.js" rel="noopener">source</a> ·
+    <a href="https://github.com/xtermjs/xterm.js/blob/master/LICENSE" rel="noopener">license</a>
+  </div>
+
+  <div class="card">
+    <strong>@xterm/addon-fit</strong> — terminal sizing addon <br>
+    <span class="lic">MIT · The xterm.js authors</span><br>
+    <a href="https://www.npmjs.com/package/@xterm/addon-fit" rel="noopener">npm</a> ·
+    <a href="https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit" rel="noopener">source</a>
+  </div>
+
+  <div class="card">
+    <strong>SeaBIOS</strong> — x86 BIOS used by the emulator <br>
+    <span class="lic">LGPL v3</span><br>
+    <a href="https://www.seabios.org/" rel="noopener">seabios.org</a> ·
+    <a href="https://github.com/copy/v86/tree/master/bios" rel="noopener">bundled images</a>
+  </div>
+
+  <h2>Guest operating system</h2>
+  <div class="card">
+    <strong>Debian GNU/Linux 12 (bookworm), i386</strong><br>
+    <span class="lic">
+      Debian is free software; most components are under the GNU GPL, LGPL,
+      and other free licenses. The exact terms for each package are in
+      <code>/usr/share/doc/&lt;package&gt;/copyright</code> inside the machine.
+    </span><br>
+    <a href="https://www.debian.org/" rel="noopener">debian.org</a> ·
+    <a href="https://www.debian.org/legal/licenses/" rel="noopener">licensing</a> ·
+    <a href="https://www.debian.org/social_contract" rel="noopener">social contract</a>
+  </div>
+
+  <p>
+    Because most of Debian is GPL-licensed, the corresponding source must be
+    available. Every binary in this machine comes from Debian's archives:
+  </p>
+  <ul>
+    <li><a href="https://sources.debian.org/" rel="noopener">sources.debian.org</a>
+      — browse the source of any installed package</li>
+    <li><a href="https://deb.debian.org/debian/pool/main/" rel="noopener">deb.debian.org/debian/pool/main/</a>
+      — the source and binary pools</li>
+  </ul>
+  <p class="lic">
+    To read the exact terms for a package inside the machine, run
+    <code>cat /usr/share/doc/&lt;package&gt;/copyright</code>.
+  </p>
+
+  <h2>Installed packages</h2>
+  <p>Everything below ships in the image. Each keeps its own upstream license;
+  the authoritative copy is in <code>/usr/share/doc</code> in the guest.</p>
+  <ul>
+    <li><strong>bash</strong> — GNU GPL v3+ ·
+      <a href="https://www.gnu.org/software/bash/" rel="noopener">gnu.org/software/bash</a></li>
+    <li><strong>coreutils</strong>, <strong>util-linux</strong>, <strong>procps</strong>,
+      <strong>make</strong> — GNU GPL ·
+      <a href="https://www.gnu.org/software/coreutils/" rel="noopener">coreutils</a></li>
+    <li><strong>git</strong> — GNU GPL v2 ·
+      <a href="https://git-scm.com/" rel="noopener">git-scm.com</a></li>
+    <li><strong>gcc / g++</strong> (GCC 12) — GNU GPL v3+ with the GCC Runtime
+      Library Exception ·
+      <a href="https://gcc.gnu.org/" rel="noopener">gcc.gnu.org</a></li>
+    <li><strong>man-db</strong> — GNU GPL ·
+      <a href="https://man-db.gitlab.io/man-db/" rel="noopener">man-db</a>;
+      <strong>manpages</strong> — various permissive licenses</li>
+    <li><strong>nano</strong> — GNU GPL v3+ ·
+      <a href="https://www.nano-editor.org/" rel="noopener">nano-editor.org</a></li>
+    <li><strong>curl</strong> — MIT-like (curl license) ·
+      <a href="https://curl.se/docs/copyright.html" rel="noopener">curl license</a></li>
+    <li><strong>Linux kernel 6.1</strong> — GNU GPL v2 ·
+      <a href="https://www.kernel.org/" rel="noopener">kernel.org</a></li>
+  </ul>
+
+  <h2>This site</h2>
+  <p>
+    The GoLinux page code, service worker, and image build scripts are
+    project-specific. The Debian image was built with
+    <code>mmdebstrap</code>-style packaging from official Debian archives.
+  </p>
+
+  <footer>
+    No analytics, no tracking, no network requests beyond loading the app and
+    its disk data. <a href="./">← Back to the machine</a>
+  </footer>
+</main>
+</body>
+</html>
