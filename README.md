@@ -141,6 +141,50 @@ node tools/image/verify-manifests.js  # must pass
 
 `build-snapshot.sh` then produces `images/debian-state.bin.zst` (~12 MB).
 
+### Per-tool chunk sets and the loading indicator
+
+`packs/tools.json` records, per tool, the chunks a **first use** reads. Each tool
+is recorded in its own boot **restored from the production snapshot**
+(`images/debian-state.bin.zst`), because one shared boot gave incomplete sets:
+v86 caches every chunk it has read, so anything touched earlier was never
+re-read and never recorded. A cold `gcc main.c` needed ~98 chunks that were in no
+set.
+
+| tool | chunks | size |
+|---|---|---|
+| ls | 18 | 0.3 MB |
+| nano | 9 | 0.4 MB |
+| git | 30 | 1.6 MB |
+| make | 11 | 0.4 MB |
+| gcc | 280 | 12.7 MB |
+| g++ | 354 | 14.9 MB |
+| man | 105 | 3.5 MB |
+| curl | 140 | 6.4 MB |
+
+The page shows two things while the disk is busy, both driven by the service
+worker and neither of which types into the guest:
+
+- **`Loading from disk… N files, X MB`** — appears only after 500 ms of
+  continuous activity and hides after 300 ms of quiet, so short reads never
+  flicker. The worker sends an explicit `idle` message to end a burst, because
+  the last data message still carries new files.
+- **`Loading gcc… 137/280 (7.1 MB)`** — approximate. It counts chunks present of
+  that tool's set, not bytes. Sets overlap, so when several tools match the page
+  picks the **smallest set** that explains the observed chunks (the most specific
+  hypothesis), which correctly prefers `gcc` over `g++`.
+
+### Prefetch
+
+On a slow link the page can pull a tool's remaining chunks in the background
+(concurrency 4, 16 MB cap, one set at a time, cached chunks skipped, cancelled on
+page hide). It is gated on **measured** throughput from the worker — the first
+~10 chunk fetches are timed, because `navigator.connection.effectiveType` is
+Chromium-only — and never runs when `navigator.connection.saveData` is true.
+Measured on a cold profile at 4 Mbps/150 ms: first `gcc main.c` went from
+**38.0 s to 17.2 s** (c=4). On a fast link it is a net loss (3.4 s → 4.6 s), so
+it stays off there. Disable it entirely with `GL_PREFETCH = false` in
+`packs-config.js`.
+
 ### Rebuilding generated files
 
 These are gitignored because they are large and reproducible:
@@ -154,6 +198,7 @@ These are gitignored because they are large and reproducible:
 | `images/build-id.json` | `node tools/image/build-id.js` |
 | `packs/*.json` | `node tools/image/build-packs.js common` then `full`, then `node tools/image/build-pack-index.js` |
 | `chunks-precache.json` | `node tools/image/build-chunk-manifest.js` |
+| `packs/tools.json` | `node tools/image/build-tool-sets.js` |
 
 **Important:** rebuilding the image changes every chunk's bytes. Packs recorded
 against the previous image silently serve stale data offline (it shows up as
@@ -188,8 +233,25 @@ Full instructions live in **[DEPLOYMENT.md](./DEPLOYMENT.md)**. In short:
 node tools/image/verify-manifests.js   # manifests, build id, cache version agree
 node tools/test/check-9p-state-shape.js  # guards against a v86 upgrade breaking
                                          # the upload-stripping wrapper
-node tools/test/sw-chunk-fallback.test.js # service-worker 404/offline policy
+node tools/test/sw-chunk-fallback.test.js # service-worker 404/offline policy,
+                                         # disk-activity + throughput probes
+node tools/image/build-tool-sets.js    # re-record the per-tool chunk sets
+node tools/test/smoke-deploy.test.js   # REQUIRED before a deploy (see below)
 ```
+
+`smoke-deploy.test.js` is the production-like check and is run automatically at
+the end of `tools/deploy/build-pages.sh`. It serves the staged `.deploy-pages`
+on one origin and a local mirror of exactly what `upload-r2.sh` uploads on a
+second (real `images/debian-chunks/<buildId>/` paths, 404 for zeroed chunks),
+rewrites the asset origin **only in a temp copy**, and drives a fresh headless
+Chrome through a real session: load, `ls`, `gcc --version`, compile+run C, write
+a file in `/root`, save, reload, and confirm the file survived. It asserts every
+chunk request goes to the asset origin with the build id in the path and returns
+200, that none reach the app origin, and that no "out of date" overlay appears.
+It uses no `?assets=` override and no credentials, and exits non-zero on any
+failure. Requires Chrome/Chromium (override with `$CHROME`). For a local build
+only, `SKIP_SMOKE=1 ./tools/deploy/build-pages.sh` skips it — that output must
+not be deployed.
 
 `verify-manifests.js --deploy` additionally requires a non-empty `GL_BUILD_ID`
 that matches `images/build-id.json`, and is run by `tools/deploy/build-pages.sh`

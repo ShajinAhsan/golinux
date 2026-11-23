@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>GoLinux</title>
 <meta name="theme-color" content="#0b0d10">
 <link rel="manifest" href="manifest.json">
@@ -10,24 +10,62 @@
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="stylesheet" href="assets/xterm/xterm.css">
 <style>
-  html, body { margin: 0; height: 100%; background: #0b0d10; color: #c7ccd1; font: 13px/1.4 ui-monospace, monospace; }
-  #app { display: flex; flex-direction: column; height: 100%; }
-  #bar { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid #1d2126; flex-wrap: wrap; }
-  #bar b { color: #e8ecef; font-weight: 600; }
-  #status { color: #6f7a85; }
+  /* The app is exactly the visible viewport: no page scroll, no outer margin.
+     dvh follows mobile Safari's collapsing address bar; svh is the fallback for
+     the small-viewport case where dvh is unsupported. */
+  html, body {
+    margin: 0; padding: 0;
+    height: 100vh; height: 100dvh;
+    background: #0b0d10; color: #c7ccd1;
+    font: 13px/1.4 ui-monospace, monospace;
+    overflow: hidden;                 /* scrolling belongs to the terminal */
+    overscroll-behavior: none;        /* no rubber-band / pull-to-refresh */
+  }
+  #app {
+    display: flex; flex-direction: column;
+    height: 100vh; height: 100dvh;
+    width: 100vw; max-width: 100%;
+    min-height: 0; min-width: 0;
+    overflow: hidden;
+  }
+  /* Toolbar: brand/status on the left, actions on the right. It never wraps
+     into an unbounded stack: on narrow screens the actions collapse into a
+     menu instead (see the media query below). */
+  #bar {
+    display: flex; gap: 8px; align-items: center;
+    padding: 8px 10px; border-bottom: 1px solid #1d2126;
+    padding-left: max(10px, env(safe-area-inset-left));
+    padding-right: max(10px, env(safe-area-inset-right));
+    flex: 0 0 auto; min-width: 0;
+  }
+  #bar b { color: #e8ecef; font-weight: 600; flex: 0 0 auto; }
+  /* Status is the flexible element: it truncates rather than pushing the
+     buttons off-screen. */
+  #status {
+    color: #6f7a85; flex: 1 1 auto;
+    min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  #barActions { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
+  #barMenuBtn { display: none; }
   button { background: #171b20; color: #c7ccd1; border: 1px solid #2a3037; border-radius: 4px; padding: 4px 9px; font: inherit; cursor: pointer; }
   button:hover { border-color: #3d454e; }
   button:disabled { opacity: 0.45; cursor: default; }
-  /* Fill the window. min-height:0 lets the flex child shrink so the terminal
-     scrolls internally instead of growing the page; without it a tall terminal
-     pushes the key bar off-screen and the prompt out of view. */
+  /* The terminal is the only element that grows, and it may shrink to nothing
+     (min-height:0) so the flex column never overflows the viewport. */
   #terminal {
-    flex: 1 1 auto; min-height: 0; padding: 6px 8px;
-    overflow: hidden; position: relative;
+    flex: 1 1 auto; min-height: 0; min-width: 0;
+    padding: 6px 8px; overflow: hidden; position: relative;
   }
-  /* xterm sizes itself from the container; make it inherit the box exactly. */
   #terminal .xterm, #terminal .xterm-viewport, #terminal .xterm-screen {
     height: 100% !important;
+  }
+  /* Tapping the terminal must not pop the iOS selection/callout UI. */
+  #terminal, #terminal * { -webkit-touch-callout: none; }
+  #terminal .xterm-helper-textarea {
+    /* Keep the textarea usable for the native keyboard, but never let it
+       scroll the page when it is focused off-screen. */
+    position: fixed; opacity: 0; left: 0; top: 0; width: 1px; height: 1px;
   }
 
   .bar { display: none; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid #1d2126; background: #101317; }
@@ -98,40 +136,77 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* On-screen key bar (touch devices) */
+  /* Overflow menu for narrow toolbars. */
+  #barMenu {
+    position: absolute; right: 8px; top: calc(100% - 4px);
+    display: flex; flex-direction: column; gap: 2px;
+    background: #101317; border: 1px solid #262c33; border-radius: 8px;
+    padding: 6px; z-index: 20; min-width: 200px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  }
+  #barMenu[hidden] { display: none; }
+  #barMenu button, #barMenu a {
+    text-align: left; padding: 11px 12px; min-height: 44px;
+    display: flex; align-items: center;
+    background: transparent; border: 0; color: #c7ccd1;
+    font: inherit; text-decoration: none; border-radius: 6px; cursor: pointer;
+  }
+  #barMenu button:hover, #barMenu a:hover { background: #171b20; }
+  #bar { position: relative; }
+
+  /* On-screen terminal keys (touch devices). */
   #keybar {
-    display: none; gap: 4px; padding: 6px; border-top: 1px solid #1d2126;
-    background: #0e1114;
-    /* Wrap rather than scroll: on a narrow phone every key must be reachable
-       without a horizontal swipe that also scrolls the terminal. */
-    flex-wrap: wrap;
+    display: none; flex-direction: column; gap: 4px;
+    padding: 5px 6px; padding-bottom: max(5px, env(safe-area-inset-bottom));
+    border-top: 1px solid #1d2126; background: #0e1114;
+    flex: 0 0 auto;
   }
   #keybar.visible { display: flex; }
+  #keybar .kb-row { display: flex; gap: 4px; }
+  #keybar .kb-row[hidden] { display: none; }
   #keybar button {
-    min-width: 40px; padding: 7px 8px; font-size: 12px;
-    background: #171b20; border: 1px solid #2a3037; border-radius: 4px;
-    white-space: nowrap; touch-action: manipulation;
+    flex: 1 1 0; min-width: 0;
+    /* Comfortable touch target (~44px), and no double-tap zoom or long-press
+       selection on rapid taps. */
+    min-height: 44px; padding: 0 6px; font-size: 13px;
+    background: #171b20; color: #c7ccd1;
+    border: 1px solid #2a3037; border-radius: 6px;
+    white-space: nowrap;
+    touch-action: manipulation;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
   }
   #keybar button:active { background: #22282f; border-color: #3d454e; }
-  #keybar .spacer { flex: 1; }
+  /* Armed modifier: unmistakable, and the only thing that stays "on". */
+  #keybar button[aria-pressed="true"] {
+    background: #1d3a24; border-color: #2d6a3a; color: #7ee787;
+    box-shadow: inset 0 0 0 1px #2d6a3a;
+  }
 
-  @media (max-width: 640px) {
+  @media (max-width: 760px) {
+    /* Actions move into the ⋮ menu; only Restart and the menu button remain. */
     #bar { padding: 6px 8px; font-size: 12px; gap: 6px; }
     #bar b { font-size: 12px; }
+    #barActions { gap: 6px; }
+    .wide-only { display: none !important; }
+    #barMenuBtn { display: inline-flex; align-items: center; justify-content: center;
+      min-width: 44px; min-height: 44px; font-size: 16px; line-height: 1; }
+    #restart { min-height: 44px; padding: 0 12px; }
     #terminal { padding: 4px 6px; }
-    #keybar { padding: 4px; gap: 3px; }
-    #keybar button { min-width: 0; flex: 1 1 auto; padding: 7px 5px; font-size: 11px; }
   }
 
-  /* Use the dynamic viewport height where supported: on mobile browsers 100vh
-     includes the area behind the on-screen keyboard, which is what pushes the
-     prompt out of view. */
-  @supports (height: 100dvh) {
-    html, body { height: 100dvh; }
+  /* Very short viewports (landscape phone): keep the terminal usable. */
+  @media (max-height: 420px) {
+    #keybar button { min-height: 38px; font-size: 12px; }
+    #bar { padding: 3px 6px; }
+    #barMenuBtn, #restart { min-height: 36px; }
   }
 
-  #offlineBanner {
-    display: none; align-items: center; gap: 10px;
+  #diskBar { gap: 8px; }
+  #diskBar .disk-sub { color: #8b95a1; font-size: 12px; }
+  #diskBar.busy #diskLabel { color: #7ee787; }
+
+  #offlineBanner {    display: none; align-items: center; gap: 10px;
     padding: 7px 10px; background: #3a2a10; border-bottom: 1px solid #6b4d16;
     color: #f0c674; font-size: 12px;
   }
@@ -150,12 +225,27 @@
   <div id="bar">
     <b>GoLinux</b>
     <span id="status">booting…</span>
-    <button id="restart">Restart</button>
-    <button id="openPacks">Save for offline use</button>
-    <button id="uploadBtn" title="Send a file into the guest (max 50 MB)">Upload</button>
-    <button id="downloadBtn" title="Download /root as a zip">Download /root</button>
-    <button id="resetBtn" title="Discard saved session and start fresh">Reset</button>
-    <a id="aboutLink" href="about.html" style="color:#8b95a1;font-size:12px;text-decoration:none;padding:4px 2px;">About</a>
+
+    <!-- One row on desktop. On narrow screens .wide-only hides and the same
+         buttons move into #barMenu, so nothing is pushed off-screen. -->
+    <div id="barActions">
+      <button id="restart">Restart</button>
+      <button id="openPacks" class="wide-only">Save for offline use</button>
+      <button id="uploadBtn" class="wide-only" title="Send a file into the guest (max 50 MB)">Upload</button>
+      <button id="downloadBtn" class="wide-only" title="Download /root as a zip">Download /root</button>
+      <button id="resetBtn" class="wide-only" title="Discard saved session and start fresh">Reset</button>
+      <a id="aboutLink" class="wide-only" href="about.html" style="color:#8b95a1;font-size:12px;text-decoration:none;padding:4px 2px;">About</a>
+      <button id="barMenuBtn" aria-haspopup="true" aria-expanded="false" aria-label="More actions">⋮</button>
+    </div>
+
+    <div id="barMenu" role="menu" hidden>
+      <button id="mPacks" role="menuitem">Save for offline use</button>
+      <button id="mUpload" role="menuitem">Upload</button>
+      <button id="mDownload" role="menuitem">Download /root</button>
+      <button id="mReset" role="menuitem">Reset</button>
+      <a id="mAbout" role="menuitem" href="about.html">About</a>
+    </div>
+
     <input type="file" id="uploadInput" multiple hidden>
     <span id="persistStatus"></span>
   </div>
@@ -172,6 +262,11 @@
     <span class="pct" id="packProgressPct"></span>
     <button id="packPause">Pause</button>
     <button id="packCancel">Cancel</button>
+  </div>
+
+  <div id="diskBar" class="bar" aria-live="polite">
+    <span class="label" id="diskLabel">Loading from disk…</span>
+    <span class="disk-sub" id="diskSub"></span>
   </div>
 
   <div id="offlineBanner" role="status">
@@ -248,20 +343,38 @@
     <div class="detail" id="loadingDetail"></div>
   </div>
 
-  <div id="keybar" aria-label="On-screen keys">
-    <button data-key="esc" aria-label="Escape">Esc</button>
-    <button data-key="tab" aria-label="Tab">Tab</button>
-    <button data-key="ctrl" aria-label="Control">Ctrl</button>
-    <button data-key="alt" aria-label="Alt">Alt</button>
-    <button data-key="left" aria-label="Left arrow">←</button>
-    <button data-key="up" aria-label="Up arrow">↑</button>
-    <button data-key="down" aria-label="Down arrow">↓</button>
-    <button data-key="right" aria-label="Right arrow">→</button>
-    <button data-sym="|">|</button>
-    <button data-sym="/">/</button>
-    <button data-sym="~">~</button>
-    <button data-sym="-">-</button>
-    <button data-sym="_">_</button>
+  <!-- Mobile terminal controls. Two rows on a phone: modifiers on the first,
+       keys on the second, so both are reachable one-handed. -->
+  <div id="keybar" aria-label="Terminal keys">
+    <div class="kb-row">
+      <button data-act="ctrl" aria-pressed="false" aria-label="Control (one-shot)">Ctrl</button>
+      <button data-act="alt" aria-pressed="false" aria-label="Alt (one-shot)">Alt</button>
+      <button data-act="esc" aria-label="Escape">Esc</button>
+      <button data-act="tab" aria-label="Tab">Tab</button>
+      <button data-act="keyboard" aria-label="Show or hide the keyboard">⌨</button>
+      <button data-act="more" aria-label="More keys" aria-expanded="false">⋯</button>
+    </div>
+    <div class="kb-row">
+      <button data-act="left" aria-label="Left arrow">←</button>
+      <button data-act="up" aria-label="Up arrow">↑</button>
+      <button data-act="down" aria-label="Down arrow">↓</button>
+      <button data-act="right" aria-label="Right arrow">→</button>
+      <button data-act="enter" aria-label="Enter">⏎</button>
+      <button data-act="backspace" aria-label="Backspace">⌫</button>
+    </div>
+    <div class="kb-row kb-extra" hidden>
+      <button data-sym="|">|</button>
+      <button data-sym="/">/</button>
+      <button data-sym="~">~</button>
+      <button data-sym="-">-</button>
+      <button data-sym="_">_</button>
+      <button data-sym=":">:</button>
+      <button data-sym="*">*</button>
+      <button data-sym="$">$</button>
+      <button data-sym="x">x</button>
+      <button data-sym="c">c</button>
+      <button data-sym="z">z</button>
+    </div>
   </div>
 
   <div id="fatal" role="alertdialog" aria-labelledby="fatalTitle">
@@ -414,19 +527,53 @@ function fmt(bytes) {
 
 let packManifest = {};
 
-function renderPacks(installed) {
+/* Pack state comes from the CACHE (GoPacks.packStates), never from a stored
+ * "installed" flag: a flag can disagree with what is really saved. */
+
+function packLabel(id, st) {
+  if (!st) return "…";
+  if (st.total && st.complete) return "saved";
+  if (st.present > 0) return `${st.present} of ${st.total} saved (resume)`;
+  return "not saved";
+}
+
+function renderPacks(states) {
+  states = states || {};
+  const busy = !!(GoPacks.getJob && GoPacks.getJob());
+  const running = GoPacks.getJob && GoPacks.getJob();
+
   for (const id of ["minimal", "common", "full"]) {
     const sizeEl = document.querySelector(`[data-size="${id}"]`);
     const badgeEl = document.querySelector(`[data-badge="${id}"]`);
     const row = document.querySelector(`.pack[data-pack="${id}"]`);
     const info = packManifest[id];
+    const st = states[id];
+
     if (sizeEl && info) {
       sizeEl.textContent = id === "minimal"
         ? fmt(info.totalBytes)
         : `${fmt(info.bytes)} · ${fmt(info.totalBytes)} total`;
     }
-    if (badgeEl) badgeEl.textContent = installed === id ? "· installed" : "";
-    if (row) row.classList.toggle("installed", installed === id);
+    if (badgeEl) badgeEl.textContent = id === "minimal"
+      ? ""
+      : "· " + packLabel(id, st);
+    if (row) row.classList.toggle("installed", !!(st && st.complete));
+
+    // While any job runs, only that pack's own buttons stay usable (so Remove
+    // means "cancel this one"); everything else is disabled.
+    const isRunningPack = busy && running && running.packId === id;
+    const saveBtn = document.querySelector(`[data-install="${id}"]`);
+    const remBtn = document.querySelector(`[data-remove="${id}"]`);
+    if (saveBtn) {
+      saveBtn.disabled = busy && !isRunningPack;
+      saveBtn.textContent = id === "minimal" ? "Use"
+        : (st && st.complete ? "Saved" : (st && st.present > 0 ? "Resume" : "Save"));
+    }
+    if (remBtn) {
+      remBtn.disabled = busy && !isRunningPack;
+      if (isRunningPack && running.kind === "download") remBtn.textContent = "Cancel";
+      else remBtn.textContent = "Remove";
+    }
   }
   document.getElementById("saveDataNote").classList.toggle("visible", networkSaysFrugal());
   showQuota();
@@ -443,34 +590,41 @@ async function showQuota() {
 }
 
 function renderPackProgress(s) {
-  if (!s.running) {
+  const j = s && s.job;
+  if (!j) {
     packProgressEl.classList.remove("visible");
     return;
   }
   packProgressEl.classList.add("visible");
-  const pct = s.total ? (s.done / s.total) * 100 : 0;
+  const pct = j.total ? (j.done / j.total) * 100 : 0;
   packProgressFill.style.width = pct.toFixed(1) + "%";
-  packProgressLabel.textContent = `${s.paused ? "Paused" : "Downloading"} ${s.packId} pack`;
-  packProgressPct.textContent = `${s.done}/${s.total} · ${fmt(s.loaded)}`;
-  packPauseBtn.textContent = s.paused ? "Resume" : "Pause";
+  const verb = j.paused ? "Paused" : (j.kind === "download" ? "Downloading" : "Removing");
+  packProgressLabel.textContent = `${verb} ${j.packId} pack`;
+  packProgressPct.textContent = `${j.done}/${j.total} · ${fmt(j.loaded)}`;
+  packPauseBtn.textContent = j.paused ? "Resume" : "Pause";
+  packPauseBtn.disabled = j.kind !== "download";
 }
 
-GoPacks.onUpdate(async s => {
-  renderPackProgress(s);
-  if (!s.running) {
-    renderPacks(GoPacks.installedPack());
-    if (s.cancelled) {
-      packStatusEl.textContent = "Cancelled. Chunks already saved were kept.";
-    } else if (s.total && s.done >= s.total) {
-      packStatusEl.textContent = `Saved ${s.packId} pack.`;
-    }
+function packSizes(states) {
+  // Saved bytes across packs, for the "use minimal" confirmation.
+  let bytes = 0;
+  for (const id of ["common", "full"]) {
+    const st = states[id], info = packManifest[id];
+    if (st && st.total && info) bytes = Math.max(bytes, info.bytes * (st.present / st.total));
   }
+  return bytes;
+}
+
+GoPacks.onUpdate(s => {
+  renderPackProgress(s);
+  renderPacks(s.states);
 });
 
 document.getElementById("openPacks").onclick = async () => {
   packsEl.classList.add("visible");
   packManifest = await GoPacks.loadManifest();
-  renderPacks(GoPacks.installedPack());
+  const states = await GoPacks.packStates();
+  renderPacks(states);
 };
 
 document.getElementById("closePacks").onclick = () => packsEl.classList.remove("visible");
@@ -478,26 +632,76 @@ packsEl.addEventListener("click", e => {
   if (e.target === packsEl) packsEl.classList.remove("visible");
 });
 
+// BroadcastChannel: another tab changed the caches. Recompute and redraw.
+try {
+  const bc = new BroadcastChannel("golinux-packs-ui");
+  bc.onmessage = async () => {
+    if (!packsEl.classList.contains("visible")) return;
+    renderPacks(await GoPacks.packStates());
+  };
+} catch (e) { /* unsupported */ }
+
 packsEl.addEventListener("click", async e => {
-  const t = e.target;
-  const installId = t.getAttribute && t.getAttribute("data-install");
-  const removeId = t.getAttribute && t.getAttribute("data-remove");
+  const t = e.target.closest && e.target.closest("button");
+  if (!t) return;
+  const installId = t.getAttribute("data-install");
+  const removeId = t.getAttribute("data-remove");
   if (!installId && !removeId) return;
+  if (t.disabled) return;
 
   packStatusEl.textContent = "";
-  if (installId) {
-    await GoPacks.install(installId);
+  let result;
+
+  if (installId === "minimal") {
+    // Switching to minimal wipes saved pack chunks, so ask first.
+    const states = await GoPacks.packStates();
+    const anySaved = (states.common && states.common.present > 0) ||
+                     (states.full && states.full.present > 0);
+    if (!anySaved && !GoPacks.getJob()) {
+      packStatusEl.textContent = "Minimal is already in use.";
+      return;
+    }
+    const size = fmt(packSizes(states));
+    const ok = confirm(
+      "This removes the saved packs" + (size ? " (" + size + ")" : "") +
+      ". Continue?");
+    if (!ok) { packStatusEl.textContent = "Cancelled."; return; }
+    result = await GoPacks.useMinimal();
+  } else if (installId) {
+    result = await GoPacks.install(installId);
   } else {
-    await GoPacks.removePack(removeId);
-    packStatusEl.textContent = `Removed ${removeId} pack.`;
+    const job = GoPacks.getJob();
+    if (job && job.packId === removeId && job.kind === "download") {
+      // Remove on the downloading pack: cancel, then remove.
+      GoPacks.cancel();
+      packStatusEl.textContent = "Cancelling… then removing.";
+      result = await GoPacks.removePack(removeId);
+    } else {
+      result = await GoPacks.removePack(removeId);
+    }
   }
+
+  if (result && result.refused) packStatusEl.textContent = result.reason;
+  else if (result && result.error) packStatusEl.textContent = "Failed: " + result.error;
+  else if (result && result.cancelled) packStatusEl.textContent = result.reason;
+  else if (result && result.incomplete) packStatusEl.textContent = result.reason;
+  else if (result && result.complete) packStatusEl.textContent = "Saved " + installId + " pack.";
+  else if (result && typeof result.deleted === "number") {
+    packStatusEl.textContent = removeId === "minimal"
+      ? `Removed all saved pack chunks (${result.deleted} chunks).`
+      : `Removed ${removeId} pack (${result.deleted} chunks; shared chunks kept).`;
+  }
+  renderPacks(await GoPacks.packStates());
 });
 
 packPauseBtn.onclick = () => {
-  if (GoPacks.getState().paused) GoPacks.resume();
-  else GoPacks.pause();
+  const j = GoPacks.getJob();
+  if (!j) return;
+  if (j.paused) GoPacks.resume(); else GoPacks.pause();
 };
-packCancelBtn.onclick = () => GoPacks.cancel();
+packCancelBtn.onclick = () => {
+  if (!GoPacks.cancel()) packStatusEl.textContent = "Nothing to cancel.";
+};
 
 /* ---------- offline banner ----------
  * Shown when the guest asks for a disk chunk that is neither cached nor
@@ -521,11 +725,372 @@ document.getElementById("offlineBannerOpen").onclick = () => {
   document.getElementById("openPacks").click();
 };
 
+/* ---------- "Loading from disk…" indicator ----------
+ *
+ * The service worker reports how many chunk fetches are in flight and how much
+ * has been loaded. Two timers give it hysteresis so it never flickers:
+ *   - show only after the disk has been busy CONTINUOUSLY for 500 ms
+ *   - hide only after 300 ms of quiet
+ * A short read therefore produces no UI at all. This is page chrome only; it
+ * never sends anything into the guest.
+ */
+const diskBar = document.getElementById("diskBar");
+const diskLabel = document.getElementById("diskLabel");
+const diskSub = document.getElementById("diskSub");
+
+const DISK_SHOW_MS = 500;
+const DISK_HIDE_MS = 300;
+let diskShowTimer = null;
+let diskHideTimer = null;
+let diskVisible = false;
+let diskStats = { files: 0, bytes: 0 };
+
+/* When did this burst of disk activity start?
+ *
+ * The worker posts at most every 250 ms, and each local chunk takes a few
+ * milliseconds, so sampling `pending` at post time almost always shows 0 even
+ * during a long compile. Judging "busy for 500 ms" from that would never fire.
+ * Instead the burst is timed from the FIRST busy report to the moment the
+ * worker reports idle: any run of disk reads lasting >= 500 ms is one burst. */
+let burstStart = 0;
+let lastDiskFiles = 0;
+
+function diskFormat(reset) {
+  const mb = (diskStats.bytes / 1048576).toFixed(1);
+  diskLabel.textContent = "Loading from disk…";
+  diskSub.textContent = `${diskStats.files} file${diskStats.files === 1 ? "" : "s"}, ${mb} MB`;
+  if (reset) { diskStats = { files: 0, bytes: 0 }; }
+}
+
+function showDiskBar() {
+  clearTimeout(diskHideTimer); diskHideTimer = null;
+  if (diskVisible) return;
+  diskVisible = true;
+  diskStats = { files: 0, bytes: 0 };
+  diskFormat(false);
+  diskBar.classList.add("visible", "busy");
+}
+
+function hideDiskBar() {
+  clearTimeout(diskShowTimer); diskShowTimer = null;
+  if (!diskVisible) return;
+  diskVisible = false;
+  diskBar.classList.remove("visible", "busy");
+  diskStats = { files: 0, bytes: 0 };
+  // A new burst may be a different tool; let the next activity re-detect one.
+  activeTool = null;
+  toolCounted = new Set();
+  toolCachedCount = 0;
+}
+
+function onDiskActivity(msg) {
+  const now = Date.now();
+  // `files` is CUMULATIVE for the session, so it cannot be used directly as a
+  // busy flag (that kept the bar visible forever). A burst continues while
+  // requests are in flight OR new files have arrived since the last report.
+  const newFiles = (msg.files || 0) - lastDiskFiles;
+  lastDiskFiles = msg.files || 0;
+  // The worker sends an explicit idle:true when a burst has settled. It is the
+  // only unambiguous end-of-burst signal, because the last data message of a
+  // burst still carries new files and would otherwise look busy.
+  const busy = !msg.idle && (msg.pending > 0 || newFiles > 0);
+  if (busy && !burstStart) burstStart = now;
+
+  if (busy) {
+    clearTimeout(diskHideTimer); diskHideTimer = null;
+    diskStats = { files: msg.files, bytes: msg.bytes };
+
+    // Does this activity belong to a tool set? If so, prefer the tool view.
+    const tool = toolForNames(msg.names);
+    if (tool && tool !== activeTool) {
+      activeTool = tool;
+      toolTotal = toolSets[tool].list.length;
+      toolCachedCount = 0;
+      toolCounted = new Set();
+      // Count this batch's names at once, then reconcile against the caches.
+      for (const n of (msg.names || [])) {
+        if (toolSets[tool].names.has(n) && !toolCounted.has(n)) {
+          toolCounted.add(n);
+          toolCachedCount++;
+        }
+      }
+      measureToolCached(tool, toolCounted).then(() => {
+        if (activeTool === tool && diskVisible) renderToolBar();
+      });
+      // A tool just became active on a cold cache: on a slow link, pull its
+      // remaining chunks in the background (gated and capped internally).
+      maybePrefetch(tool);
+    } else if (tool && Array.isArray(msg.names)) {
+      for (const n of msg.names) {
+        if (!toolCounted.has(n) && toolSets[tool].names.has(n)) {
+          toolCounted.add(n);
+          toolCachedCount = Math.min(toolTotal, toolCachedCount + 1);
+        }
+      }
+    }
+
+    const elapsed = burstStart ? now - burstStart : 0;
+
+    if (diskVisible) {
+      if (activeTool) renderToolBar(); else diskFormat(false);
+    } else if (elapsed >= DISK_SHOW_MS) {
+      // The burst has now lasted long enough to be worth showing.
+      clearTimeout(diskShowTimer); diskShowTimer = null;
+      showDiskBar();
+      if (activeTool) renderToolBar(); else diskFormat(false);
+    } else if (!diskShowTimer) {
+      // Not yet 500 ms: check again when it would be, unless more activity
+      // arrives first (which only extends the burst).
+      diskShowTimer = setTimeout(() => {
+        diskShowTimer = null;
+        if (!burstStart) return;
+        if (Date.now() - burstStart >= DISK_SHOW_MS && !diskVisible) {
+          showDiskBar();
+          if (activeTool) renderToolBar(); else diskFormat(false);
+        }
+      }, DISK_SHOW_MS - elapsed);
+    }
+  } else {
+    // Idle: the burst has ended. Hide only if it actually lasted long enough to
+    // show; a short burst must never flash the bar.
+    clearTimeout(diskShowTimer); diskShowTimer = null;
+    const lasted = burstStart ? now - burstStart : 0;
+    burstStart = 0;
+    if (diskVisible && !diskHideTimer) {
+      diskHideTimer = setTimeout(hideDiskBar, DISK_HIDE_MS);
+    } else if (!diskVisible && lasted < DISK_SHOW_MS) {
+      // Too short to show: ensure nothing is left armed.
+      if (activeTool) { activeTool = null; toolCounted = new Set(); toolCachedCount = 0; }
+    }
+  }
+}
+
+/* ---------- per-tool progress (approximate) ----------
+ *
+ * packs/<buildId>/tools.json lists, per tool, the chunks a FIRST USE reads,
+ * recorded from a cold boot of the production snapshot. When the worker reports
+ * disk activity whose chunk names fall inside a tool's set, show
+ * "Loading gcc… 137/280 (7.1 MB)".
+ *
+ * Progress = chunks of that set already cached / set size. It is APPROXIMATE:
+ *   - it counts chunks, not bytes, and chunk sizes vary
+ *   - a chunk may be all cache-hit or all network
+ *   - sets OVERLAP (shared libs), so one fetch advances several tools. We do not
+ *     deduplicate; we show the set with the most matching names and mark it "≈".
+ *
+ * The cached count is measured ONCE when a tool becomes active (a cache probe
+ * per chunk), then incremented as the worker reports new names, so redraws are
+ * cheap.
+ */
+let toolSets = null;
+let toolSetsPromise = null;
+let activeTool = null;
+let toolTotal = 0;
+let toolCachedCount = 0;
+let toolCounted = new Set();
+
+function loadToolSets() {
+  if (toolSetsPromise) return toolSetsPromise;
+  toolSetsPromise = (async () => {
+    try {
+      const r = await fetch(glPackUrl("tools.json"), { cache: "no-store" });
+      if (!r.ok) return null;
+      const raw = await r.json();
+      const sets = {};
+      for (const [id, v] of Object.entries(raw)) {
+        if (!v || !Array.isArray(v.chunks)) continue;
+        sets[id] = { title: v.title || id, bytes: v.bytes || 0,
+                     names: new Set(v.chunks), list: v.chunks };
+      }
+      toolSets = sets;
+      return sets;
+    } catch (e) { return null; }
+  })();
+  return toolSetsPromise;
+}
+
+/**
+ * The tool set these chunk names most likely belong to, or null.
+ *
+ * Chunks OVERLAP heavily (libc, ld, the dynamic loader), so "most matching
+ * names" mislabels: a gcc compile touches loader chunks shared with curl, and a
+ * plain count picked curl. Nor is a specificity weight enough: gcc ⊂ g++ by
+ * 280 of 354 chunks, so shared gcc chunks always look more "g++".
+ *
+ * The rule that holds is MOST SPECIFIC HYPOTHESIS: among tools that explain a
+ * comparable share of what was observed, pick the SMALLEST set. That prefers
+ * gcc over g++ when only gcc-sized evidence is present, and still picks g++ when
+ * its own extra chunks show up.
+ */
+let chunkOwners = null;
+function buildChunkOwners() {
+  chunkOwners = new Map();
+  for (const [id, s] of Object.entries(toolSets)) {
+    for (const n of s.names) {
+      if (!chunkOwners.has(n)) chunkOwners.set(n, []);
+      chunkOwners.get(n).push(id);
+    }
+  }
+}
+
+function toolForNames(names) {
+  if (!toolSets || !names || !names.length) return null;
+  if (!chunkOwners) buildChunkOwners();
+
+  const hits = new Map();
+  for (const n of names) {
+    const owners = chunkOwners.get(n);
+    if (!owners) continue;
+    for (const id of owners) hits.set(id, (hits.get(id) || 0) + 1);
+  }
+  const candidates = [...hits.entries()].filter(([, h]) => h >= 2);
+  if (!candidates.length) return null;
+
+  // Keep tools that explain at least half as much as the best one, then take
+  // the smallest set among them (the most specific explanation).
+  const maxHit = Math.max(...candidates.map(([, h]) => h));
+  const kept = candidates.filter(([, h]) => h >= maxHit * 0.5);
+  kept.sort((a, b) => toolSets[a[0]].list.length - toolSets[b[0]].list.length);
+  return kept[0][0];
+}
+
+/** One cache probe per chunk, only when a tool becomes active. */
+async function measureToolCached(id, counted) {
+  const s = toolSets && toolSets[id];
+  if (!s) return;
+  // Every chunk we have already seen fetched counts as loaded; the rest must be
+  // probed in the caches, which is why this runs once per tool, not per redraw.
+  for (const name of s.list) {
+    if (counted.has(name)) continue;
+    for (const cacheName of [GL_PACK_CACHE, GL_DATA_CACHE]) {
+      try {
+        const c = await caches.open(cacheName);
+        if (await c.match("/" + GL_CHUNK_PATH + name, { ignoreSearch: true })) {
+          counted.add(name); break;
+        }
+      } catch (e) { /* cache unavailable */ }
+    }
+  }
+  toolCachedCount = counted.size;
+}
+
+function renderToolBar() {
+  if (!activeTool || !toolSets) return;
+  const s = toolSets[activeTool];
+  const frac = toolTotal ? toolCachedCount / toolTotal : 0;
+  diskLabel.textContent = "Loading " + s.title + "…";
+  diskSub.textContent =
+    toolCachedCount + "/" + toolTotal +
+    " (" + (s.bytes * frac / 1048576).toFixed(1) + " MB)";
+  diskBar.classList.add("busy");
+}
+
+/* ---------- optional prefetch of a tool's chunk set ----------
+ *
+ * Enabled only when the service worker has MEASURED a slow link (see
+ * GL_PREFETCH_MIN_BPS in packs-config.js), never when the user asked to save
+ * data, and only one set at a time. Chunks already cached are skipped, the set
+ * is capped by bytes, and an abort controller cancels everything if the page is
+ * torn down.
+ *
+ * Prefetch is a bandwidth trade, not a correctness feature: it runs alongside
+ * whatever the guest is already doing, and a failure just means the compile
+ * fetches the rest itself.
+ */
+const prefetchState = { running: false, controller: null, tool: null };
+
+function askThroughput() {
+  return new Promise((resolve) => {
+    const ctrl = navigator.serviceWorker.controller;
+    if (!ctrl) return resolve(null);
+    const onMsg = (e) => {
+      if (e.data && e.data.type === "throughput") {
+        navigator.serviceWorker.removeEventListener("message", onMsg);
+        resolve(e.data);
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onMsg);
+    ctrl.postMessage({ type: "get-throughput" });
+    setTimeout(() => {
+      navigator.serviceWorker.removeEventListener("message", onMsg);
+      resolve(null);
+    }, 2000);
+  });
+}
+
+async function maybePrefetch(toolId) {
+  if (!GL_PREFETCH) return;
+  if (prefetchState.running) return;                     // one set at a time
+  if (navigator.connection && navigator.connection.saveData) return;  // never
+  const sets = await loadToolSets();
+  const s = sets && sets[toolId];
+  if (!s) return;
+
+  // Only bother on a link where the measurement says prefetch wins.
+  const t = await askThroughput();
+  if (!t || !t.bps || t.bps >= GL_PREFETCH_MIN_BPS) return;
+
+  // Respect the byte cap: skip the tail of a big set rather than blowing the
+  // user's allowance.
+  const list = [];
+  let bytes = 0;
+  for (const name of s.list) {
+    if (bytes >= GL_PREFETCH_CAP_BYTES) break;
+    list.push(name);
+    bytes += 128 * 1024;   // 128 KiB chunks; the cap only needs to be close
+  }
+
+  prefetchState.running = true;
+  prefetchState.tool = toolId;
+  prefetchState.controller = new AbortController();
+  const signal = prefetchState.controller.signal;
+
+  try {
+    let i = 0;
+    const worker = async () => {
+      while (i < list.length && !signal.aborted) {
+        const name = list[i++];
+        // Skip what is already cached: a prefetch must never re-download.
+        let cached = false;
+        for (const cn of [GL_PACK_CACHE, GL_DATA_CACHE]) {
+          try {
+            const c = await caches.open(cn);
+            if (await c.match("/" + GL_CHUNK_PATH + name, { ignoreSearch: true })) {
+              cached = true; break;
+            }
+          } catch (e) { /* ignore */ }
+        }
+        if (cached || signal.aborted) continue;
+        try {
+          await fetch("/" + GL_CHUNK_PATH + name,
+            { signal, cache: "default" });
+        } catch (e) { /* aborted or failed: the compile will fetch it */ }
+      }
+    };
+    await Promise.all(Array.from({ length: GL_PREFETCH_CONCURRENCY }, worker));
+  } finally {
+    prefetchState.running = false;
+    prefetchState.controller = null;
+    prefetchState.tool = null;
+  }
+}
+
+/** Cancel a prefetch when the tab goes away (or is hidden for good). */
+window.addEventListener("pagehide", () => {
+  if (prefetchState.controller) prefetchState.controller.abort();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && prefetchState.controller) {
+    prefetchState.controller.abort();
+  }
+});
+
 // The service worker reports every chunk it had to substitute and could not
 // fetch. That is the only reliable signal: navigator.onLine is often true even
 // when nothing is reachable.
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.addEventListener("message", e => {
+    if (e.data && e.data.type === "disk-activity") onDiskActivity(e.data);
     if (e.data && e.data.type === "chunk-miss") showOfflineBanner();
 
     // A REAL data chunk could not be fetched. Substituting zeros here would
@@ -546,9 +1111,13 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-// Also react if the browser itself knows it is offline.
-window.addEventListener("offline", () => {
-  if (!GoPacks.installedPack || GoPacks.installedPack() === "minimal") {
+// Also react if the browser itself knows it is offline. Use the cache-derived
+// state, not a stored tier flag: show the banner when no pack is fully saved.
+window.addEventListener("offline", async () => {
+  try {
+    const states = await GoPacks.packStates();
+    if (!states.common.complete && !states.full.complete) showOfflineBanner();
+  } catch (e) {
     showOfflineBanner();
   }
 });
@@ -1009,46 +1578,216 @@ function currentTerminal() {
          window.emulator.serial_adapter.term;
 }
 
-let fitAddon = null;
+/* ---------- terminal sizing ----------
+ *
+ * The guest tty is not fixed at 80x24: `stty` works over the serial console, so
+ * the emulator grid and the Linux tty can both follow the container. Before,
+ * fitTerminal() called term.resize(80, 24) unconditionally, which is why the
+ * terminal only ever filled ~45% of a desktop window.
+ *
+ * Measured on the real image (see the integration test): the resize command's
+ * own echo is the only visible side effect, and it disappears if echo is off
+ * while it runs. So the sequence is:
+ *     stty -echo ; stty rows R cols C ; stty echo
+ * which leaves the screen byte-identical to before.
+ *
+ * v86 has no serial resize channel, so SIGWINCH reaches the guest only because
+ * the tty geometry itself changed - which is exactly what programs like nano
+ * and `less` react to.
+ */
 
-function fitTerminal() {
-  const term = currentTerminal();
-  if (!term) return;
-  try {
-    if (!fitAddon && window.FitAddon) {
-      fitAddon = new window.FitAddon.FitAddon();
-      term.loadAddon(fitAddon);
-    }
-    if (fitAddon) {
-      // The container must be laid out; a zero-size box yields NaN dimensions
-      // and the addon silently does nothing.
-      fitAddon.fit();
-    }
-  } catch (e) {
-    console.warn("terminal fit failed:", e);
-  }
+const MIN_COLS = 20;
+const MIN_ROWS = 5;
+
+/* Last geometry actually applied, so repeated ResizeObserver callbacks with the
+ * same size do not spam the guest. */
+let appliedCols = 0;
+let appliedRows = 0;
+let resizeScheduled = false;
+let lastResizeCommandAt = 0;
+
+function currentTerminal() {
+  return window.emulator && window.emulator.serial_adapter &&
+         window.emulator.serial_adapter.term;
 }
 
-// Refit when the window changes, and once after the terminal exists.
-let fitTimer = null;
-window.addEventListener("resize", () => {
-  clearTimeout(fitTimer);
-  fitTimer = setTimeout(fitTerminal, 120);
-});
+/** Cell size in CSS px for one character cell.
+ *
+ * Measured from xterm's OWN render dimensions, not from its box divided by its
+ * current grid: the grid is what we are trying to compute, so dividing by it is
+ * circular - it produced a fixed row count (43) at every viewport, so rows never
+ * changed and the grid was clipped in landscape.
+ *
+ * xterm tracks the true cell size for its renderer; `_core._renderService`
+ * exposes it as `dimensions.css.cell`. Fall back to measuring a canvas row, then
+ * to a static estimate. */
+function cellSize(term) {
+  try {
+    const core = term._core || term.__core || null;
+    const rs = core && core._renderService;
+    const dims = rs && rs.dimensions && rs.dimensions.css;
+    if (dims && dims.cell && dims.cell.width > 0 && dims.cell.height > 0) {
+      return { w: dims.cell.width, h: dims.cell.height };
+    }
+    if (rs && rs._charSizeService && rs._charSizeService.hasValidSize) {
+      const cw = rs._charSizeService.width;
+      const ch = rs._charSizeService.height;
+      if (cw > 0 && ch > 0) return { w: cw, h: ch };
+    }
+  } catch (e) { /* fall through */ }
+
+  // Fallback: measure a row of the rendered screen. One row is one cell high,
+  // and the row's width divided by the same row's column count is one cell
+  // wide - but only when the row actually spans the full width, so use the
+  // helper textarea's font metrics instead when possible.
+  try {
+    const row = document.querySelector("#terminal .xterm-rows > div");
+    if (row && term.cols > 0) {
+      const r = row.getBoundingClientRect();
+      if (r.height > 0 && r.width > 0) {
+        return { w: r.width / term.cols, h: r.height };
+      }
+    }
+  } catch (e) { /* fall through */ }
+
+  return { w: 7.8, h: 17 };
+}
+
+/** How many cols/rows fit the terminal element right now. */
+function desiredGrid() {
+  const term = currentTerminal();
+  const el = document.getElementById("terminal");
+  if (!term || !el) return null;
+  const cs = getComputedStyle(el);
+  const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+  const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+  const availW = el.clientWidth - padX;
+  const availH = el.clientHeight - padY;
+  if (availW <= 0 || availH <= 0) return null;
+  const cell = cellSize(term);
+  const cols = Math.max(MIN_COLS, Math.floor(availW / cell.w));
+  const rows = Math.max(MIN_ROWS, Math.floor(availH / cell.h));
+  return { cols, rows };
+}
+
+/** Resize the emulator and, invisibly, the guest tty. */
+function applyGrid(cols, rows, force) {
+  const term = currentTerminal();
+  if (!term) return;
+  if (!force && cols === appliedCols && rows === appliedRows) return;
+
+  appliedCols = cols;
+  appliedRows = rows;
+
+  try {
+    term.resize(cols, rows);
+  } catch (e) {
+    console.warn("terminal resize failed:", e);
+    return;
+  }
+
+  // Tell Linux. Three things make this invisible (all measured against the real
+  // image, see tools/test/ui-layout.test.js):
+  //
+  //   1. echo is disabled BEFORE the resize command is typed, otherwise the
+  //      command echoes as it is typed (a single line cannot suppress its own
+  //      echo - the tty echoes input before bash parses it);
+  //   2. echo is re-enabled straight after, so user input still shows;
+  //   3. Ctrl-L ends the sequence. Ctrl-L is readline's clear-screen binding and
+  //      arrives as INPUT, so the shell itself redraws its prompt. ESC erase
+  //      sequences do not work here: serial0_send writes to the guest's input,
+  //      so they are typed into bash instead of moving the cursor.
+  //
+  // The debounce gates only this guest command, never term.resize() above: the
+  // emulator grid must track the box on every change, or rows get clipped when
+  // the viewport shrinks quickly (rotation, keyboard opening).
+  if (!window.emulator || !window.emulator.serial0_send) return;
+  const since = Date.now() - lastResizeCommandAt;
+  if (since < 300) {
+    // Still tell the guest once the window closes, so it never keeps a stale
+    // size.
+    clearTimeout(applyGrid.pending);
+    applyGrid.pending = setTimeout(() => {
+      lastResizeCommandAt = 0;
+      applyGrid(appliedCols, appliedRows, true);
+    }, 300 - since);
+    return;
+  }
+  lastResizeCommandAt = Date.now();
+  try {
+    const emu = window.emulator;
+    const NL = String.fromCharCode(10);
+    const CTRL_L = String.fromCharCode(12);
+    emu.serial0_send("stty -echo" + NL);
+    // Send the rest on a short timer so bash has consumed the previous line;
+    // a single burst would arrive before echo was actually disabled.
+    clearTimeout(applyGrid.sttyTimer);
+    applyGrid.sttyTimer = setTimeout(() => {
+      try {
+        emu.serial0_send("stty rows " + rows + " cols " + cols + " 2>/dev/null" + NL);
+        emu.serial0_send("stty echo" + NL);
+        emu.serial0_send(CTRL_L);
+      } catch (e) { /* guest went away */ }
+    }, 90);
+  } catch (e) { /* guest not ready yet */ }
+}
+
+function fitTerminal() {
+  const g = desiredGrid();
+  if (!g) return;
+  applyGrid(g.cols, g.rows);
+}
+
+/** Coalesce bursts (rotation fires several resize/RO callbacks). */
+function scheduleFit() {
+  if (resizeScheduled) return;
+  resizeScheduled = true;
+  requestAnimationFrame(() => {
+    resizeScheduled = false;
+    fitTerminal();
+  });
+}
 
 function fitSoon() {
-  // Two passes: the first after layout, the second after the font has loaded,
-  // which changes the cell size and therefore the column count.
+  // Layout, then again after the font has been measured.
   requestAnimationFrame(() => {
     fitTerminal();
     requestAnimationFrame(fitTerminal);
   });
-  setTimeout(fitTerminal, 500);
+  setTimeout(fitTerminal, 300);
+  setTimeout(fitTerminal, 900);
 }
 
-/* Key bar. Each button sends the exact bytes a real key would produce, so the
- * guest sees normal terminal input rather than a special protocol. Modifiers
- * (Ctrl/Alt) latch for one following keypress, like a phone keyboard. */
+/* ResizeObserver on the terminal box: this catches everything a window resize
+ * event misses - the toolbar wrapping to two lines, the key bar appearing, the
+ * mobile keyboard opening, orientation changes, and dvh settling after Safari's
+ * address bar collapses. */
+function observeTerminalBox() {
+  const el = document.getElementById("terminal");
+  if (!el || typeof ResizeObserver === "undefined") return;
+  const ro = new ResizeObserver(() => scheduleFit());
+  ro.observe(el);
+}
+
+window.addEventListener("resize", scheduleFit);
+window.addEventListener("orientationchange", () => {
+  // The new dimensions are not final until after the rotation animation.
+  setTimeout(fitTerminal, 120);
+  setTimeout(fitTerminal, 400);
+});
+
+observeTerminalBox();
+
+/* ---------- on-screen keys (touch devices) ----------
+ *
+ * Every key is sent as real terminal INPUT through xterm's own input path
+ * (term.input), not by faking DOM events: the sequence reaches the guest as if
+ * typed, so readline, nano, vim, less and shell history all behave normally.
+ *
+ * Ctrl/Alt are ONE-SHOT modifiers. Tapping Ctrl arms it (visibly); the next key
+ * consumes it; tapping Ctrl again or Esc disarms. Ctrl+X so works with two
+ * separate taps, which is the only way to do it with one finger.
+ */
 
 const KEY_SEQUENCES = {
   esc: "\x1b",
@@ -1057,81 +1796,206 @@ const KEY_SEQUENCES = {
   down: "\x1b[B",
   right: "\x1b[C",
   left: "\x1b[D",
+  enter: "\r",
+  backspace: "\x7f",
 };
 
 let latchedCtrl = false;
 let latchedAlt = false;
 
-function sendToGuest(str) {
-  if (!window.emulator) return;
-  // serial0_send takes a string; the guest's tty interprets the bytes normally.
-  window.emulator.serial0_send(str);
+/** Send bytes to the terminal's real input pipeline. */
+function sendToTerm(str) {
   const term = currentTerminal();
-  if (term && term.focus) term.focus();
+  if (!term) return;
+  try {
+    if (typeof term.input === "function") {
+      term.input(str);            // same path as a physical keypress
+    } else if (window.emulator && window.emulator.serial0_send) {
+      window.emulator.serial0_send(str);
+    }
+  } catch (e) {
+    console.warn("key send failed:", e);
+  }
 }
 
+/** Apply a one-shot modifier to a plain character or an escape sequence. */
 function applyModifiers(str) {
-  // Ctrl maps an ASCII letter to its control code (a -> \x01).
   if (latchedCtrl && str.length === 1) {
     const c = str.toUpperCase().charCodeAt(0);
-    if (c >= 64 && c <= 95) str = String.fromCharCode(c - 64);
+    // Ctrl maps @A-Z[\]^_ to 0x00-0x1f. Ctrl+C/X/Z are the ones users need.
+    if (c >= 64 && c <= 95) return String.fromCharCode(c - 64);
   }
-  if (latchedAlt && str.length === 1) {
-    str = "\x1b" + str;   // Alt = ESC prefix
-  }
+  if (latchedAlt && str.length === 1) return "\x1b" + str;
   return str;
 }
 
+function setLatched(which, on) {
+  if (which === "ctrl") latchedCtrl = on;
+  if (which === "alt") latchedAlt = on;
+  const btn = document.querySelector(`#keybar [data-act="${which}"]`);
+  if (btn) btn.setAttribute("aria-pressed", String(on));
+}
+
 function clearLatches() {
-  latchedCtrl = false;
-  latchedAlt = false;
-  for (const b of document.querySelectorAll("#keybar [aria-pressed]")) {
-    b.setAttribute("aria-pressed", "false");
-  }
+  setLatched("ctrl", false);
+  setLatched("alt", false);
 }
 
 function setupKeyBar() {
   const bar = document.getElementById("keybar");
 
-  // Show the bar on touch devices, where there is no hardware Esc/Ctrl.
-  const touch = matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+  // Touch devices have no hardware Esc/Ctrl, so show the bar there. Also show
+  // it if the user explicitly asks (see the keyboard button), and keep it
+  // available on coarse-pointer laptops with touchscreens.
+  const touch = matchMedia("(pointer: coarse)").matches ||
+                "ontouchstart" in window;
   if (touch) bar.classList.add("visible");
 
-  bar.addEventListener("click", e => {
+  // Use pointerdown, not click: it fires immediately (no 300ms delay), and
+  // preventDefault stops focus loss and synthetic mouse events, so the native
+  // keyboard stays open while keys are tapped.
+  bar.addEventListener("pointerdown", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    e.preventDefault();          // keep focus in the terminal
+    e.stopPropagation();
+    handleKeyButton(btn);
+  }, { passive: false });
+
+  // Keyboard accessibility: buttons must still work with Enter/Space.
+  bar.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
     const btn = e.target.closest("button");
     if (!btn) return;
     e.preventDefault();
+    handleKeyButton(btn);
+  });
+}
 
-    const key = btn.dataset.key;
-    const sym = btn.dataset.sym;
+function handleKeyButton(btn) {
+  const act = btn.dataset.act;
+  const sym = btn.dataset.sym;
 
-    if (key === "ctrl") {
-      latchedCtrl = !latchedCtrl;
-      btn.setAttribute("aria-pressed", String(latchedCtrl));
-      return;
-    }
-    if (key === "alt") {
-      latchedAlt = !latchedAlt;
-      btn.setAttribute("aria-pressed", String(latchedAlt));
-      return;
-    }
+  if (act === "ctrl" || act === "alt") {
+    // Toggle the one-shot latch; do not send anything.
+    const which = act;
+    const now = which === "ctrl" ? !latchedCtrl : !latchedAlt;
+    setLatched(which, now);
+    return;
+  }
 
-    if (KEY_SEQUENCES[key]) {
-      sendToGuest(applyModifiers(KEY_SEQUENCES[key]));
-      if (key !== "tab" || !latchedCtrl) clearLatches();
-      return;
-    }
-    if (sym) {
-      sendToGuest(applyModifiers(sym));
-      clearLatches();
+  if (act === "keyboard") {
+    toggleNativeKeyboard();
+    return;
+  }
+
+  if (act === "more") {
+    const extra = document.querySelector("#keybar .kb-extra");
+    if (!extra) return;
+    const show = extra.hidden;
+    extra.hidden = !show;
+    btn.setAttribute("aria-expanded", String(show));
+    scheduleFit();               // the bar got taller: re-fit the terminal
+    return;
+  }
+
+  if (act === "esc") {
+    // Esc always also disarms a latched modifier: an escape hatch.
+    sendToTerm("\x1b");
+    clearLatches();
+    return;
+  }
+
+  if (KEY_SEQUENCES[act]) {
+    const seq = KEY_SEQUENCES[act];
+    // Ctrl+arrow etc. are not meaningful over a bare serial tty; only apply
+    // modifiers to single characters.
+    sendToTerm(seq);
+    clearLatches();
+    return;
+  }
+
+  if (sym !== undefined) {
+    sendToTerm(applyModifiers(sym));
+    clearLatches();
+    return;
+  }
+}
+
+/** Show/hide the native on-screen keyboard by focusing/blurring xterm. */
+function toggleNativeKeyboard() {
+  const term = currentTerminal();
+  const ta = term && (term.textarea || (term.element &&
+    term.element.querySelector(".xterm-helper-textarea")));
+  if (!ta) return;
+  if (document.activeElement === ta) ta.blur();
+  else { term.focus(); }
+}
+
+/** Tapping the terminal focuses its real input element. */
+function setupTerminalFocus() {
+  const el = document.getElementById("terminal");
+  if (!el) return;
+  el.addEventListener("pointerdown", (e) => {
+    // Do not steal a tap that landed on a selection handle or a link.
+    if (e.target.closest("a")) return;
+    const term = currentTerminal();
+    if (term && typeof term.focus === "function") {
+      // Defer so xterm's own pointer handling (selection) finishes first.
+      setTimeout(() => { try { term.focus(); } catch (err) {} }, 0);
     }
   });
 }
 
+setupTerminalFocus();
+
 setupKeyBar();
+
+/* ---------- toolbar overflow menu (narrow screens) ----------
+ * The menu buttons are thin proxies for the real controls, so every action's
+ * behaviour lives in exactly one place: click the original button. */
+(function setupBarMenu() {
+  const menuBtn = document.getElementById("barMenuBtn");
+  const menu = document.getElementById("barMenu");
+  if (!menuBtn || !menu) return;
+
+  const open = (v) => {
+    menu.hidden = !v;
+    menuBtn.setAttribute("aria-expanded", String(v));
+  };
+  menuBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    open(menu.hidden);
+  });
+  document.addEventListener("click", (e) => {
+    if (!menu.hidden && !menu.contains(e.target) && e.target !== menuBtn) open(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !menu.hidden) { open(false); menuBtn.focus(); }
+  });
+  menu.addEventListener("click", (e) => {
+    const item = e.target.closest("button");
+    if (!item) return;
+    open(false);
+    const target = {
+      mPacks: "openPacks", mUpload: "uploadBtn",
+      mDownload: "downloadBtn", mReset: "resetBtn",
+    }[item.id];
+    if (target) document.getElementById(target).click();
+  });
+  // Keep the terminal from shrinking behind the menu: it is an overlay, so no
+  // re-fit is needed, but close it when the layout changes to a wide screen.
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 760 && !menu.hidden) open(false);
+  });
+})();
 
 // Nothing starts until chunk access is known to work, so a first visit waits
 // for the worker (a second or two) instead of hanging on 404s.
+// Per-tool sets are optional: if tools.json is missing or slow, the generic
+// "Loading from disk…" indicator still works, so this never blocks boot.
+loadToolSets();
+
 prepareChunkAccess().then(ok => {
   if (!ok) return;
   bootMachine().then(() => {

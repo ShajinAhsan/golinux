@@ -39,6 +39,9 @@ Thumbs.db
 # Assistant/tooling state, not part of the project
 .commandcode/
 
+# Wrangler's local cache: contains the account id and email, never commit it
+.wrangler/
+
 # Session audit notes — local only, not part of the project
 HANDOFF.md
 

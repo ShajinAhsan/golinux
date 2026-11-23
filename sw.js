@@ -40,7 +40,30 @@ const SHELL_FILES = [
 ];
 
 // Chunks may live on another origin; match by path, not by full URL.
-const CHUNK_RE = /\/debian-chunks\/chunk-\d+-\d+\.zst$/;
+// NOTE: production URLs include the build id segment
+// (…/debian-chunks/<buildId>/chunk-….zst). Without the optional segment below,
+// this regex only matched local dev's flat paths, so production chunk requests
+// fell through to the shell handler and 404ed against Pages instead of being
+// proxied to GL_ASSET_BASE.
+const CHUNK_RE = /\/debian-chunks\/(?:[^/]+\/)?chunk-\d+-\d+\.zst$/;
+
+/* The ?assets= override is a LOCAL-only switch and must survive the worker
+ * restarting (a worker with no activity is torn down; its memory is lost).
+ * Persist it in CacheStorage so the base never silently reverts to the
+ * production constant mid-session. */
+const GL_CONFIG_CACHE = "golinux-config";
+const GL_ASSET_OVERRIDE_KEY = "asset-base-override";
+
+let assetBaseReady = (async () => {
+  try {
+    const cache = await caches.open(GL_CONFIG_CACHE);
+    const hit = await cache.match(GL_ASSET_OVERRIDE_KEY);
+    if (hit) {
+      const base = await hit.text();
+      if (base) glSetAssetBase(base);
+    }
+  } catch (e) { /* no persisted override */ }
+})();
 
 self.addEventListener("install", event => {
   event.waitUntil((async () => {
@@ -69,10 +92,12 @@ self.addEventListener("install", event => {
 
 self.addEventListener("activate", event => {
   event.waitUntil((async () => {
-    // Keep only this build's caches. Chunk caches are namespaced by GL_VERSION
-    // and the URLs carry GL_BUILD_ID, so stale entries for another build can
-    // never be served - but deleting them reclaims space.
-    const keep = new Set([GL_SHELL_CACHE, GL_DATA_CACHE, GL_PACK_CACHE]);
+    // Keep this build's caches, plus the config cache that stores the local
+    // ?assets= override. Chunk caches are namespaced by GL_VERSION and the URLs
+    // carry GL_BUILD_ID, so stale entries for another build can never be
+    // served - but deleting them reclaims space.
+    const keep = new Set([GL_SHELL_CACHE, GL_DATA_CACHE, GL_PACK_CACHE,
+                          GL_CONFIG_CACHE]);
     const names = await caches.keys();
     await Promise.all(names.filter(n => !keep.has(n)).map(n => caches.delete(n)));
     await self.clients.claim();
@@ -80,9 +105,21 @@ self.addEventListener("activate", event => {
 });
 
 // The page tells us where chunks live (it owns the ?assets= override).
+// Persisted so it survives the worker being torn down and restarted.
 self.addEventListener("message", event => {
   if (event.data && event.data.type === "set-asset-base") {
-    glSetAssetBase(event.data.base);
+    const base = glSetAssetBase(event.data.base);
+    event.waitUntil((async () => {
+      try {
+        const cache = await caches.open(GL_CONFIG_CACHE);
+        if (base) {
+          await cache.put(GL_ASSET_OVERRIDE_KEY,
+            new Response(base, { headers: { "Content-Type": "text/plain" } }));
+        } else {
+          await cache.delete(GL_ASSET_OVERRIDE_KEY);
+        }
+      } catch (e) { /* non-fatal: the in-memory value still applies */ }
+    })());
   }
 });
 
@@ -140,6 +177,139 @@ async function headFromCache(url) {
   return null;
 }
 
+/* ---------- disk activity, for the "Loading from disk…" indicator ----------
+ *
+ * The worker sees every chunk fetch, so it is the only place that can report
+ * disk activity accurately. It counts in-flight chunk requests and their bytes
+ * and posts a summary to the page, throttled, so the toolbar can show
+ * "Loading from disk… N files, X MB".
+ *
+ * Nothing here types into the guest: this is a postMessage to the page chrome.
+ * The PAGE decides when to show anything (it waits 500 ms so short loads never
+ * flash), so a fast disk read produces no UI at all.
+ */
+const diskActivity = { pending: 0, files: 0, bytes: 0, lastPost: 0, timer: null,
+  settleTimer: null, recent: [] };
+
+function postDiskActivity() {
+  diskActivity.lastPost = Date.now();
+  diskActivity.timer = null;
+  const msg = {
+    type: "disk-activity",
+    pending: diskActivity.pending,
+    files: diskActivity.files,
+    bytes: diskActivity.bytes,
+    // Names fetched since the last post, so the page can tell which tool's set
+    // this activity belongs to. Bounded: it is only a hint for labelling.
+    names: diskActivity.recent,
+  };
+  diskActivity.recent = [];
+  self.clients.matchAll({ includeUncontrolled: true }).then(cs => {
+    for (const c of cs) c.postMessage(msg);
+  }).catch(() => {});
+}
+
+/**
+ * Coalesce to at most one message per 250 ms, and always send a final
+ * BURST-END message once things go quiet.
+ *
+ * The idle signal cannot be inferred from pending===0 alone: the last post of a
+ * burst still carries newly-arrived files, so it looks busy. The page needs an
+ * unambiguous "the burst is over" event, which is sent here after a short
+ * settle delay with no new activity.
+ */
+const BURST_SETTLE_MS = 250;
+
+function scheduleDiskPost(force) {
+  const since = Date.now() - diskActivity.lastPost;
+
+  // Any activity restarts the settle timer.
+  if (diskActivity.settleTimer) {
+    clearTimeout(diskActivity.settleTimer);
+    diskActivity.settleTimer = null;
+  }
+  if (diskActivity.pending === 0) {
+    diskActivity.settleTimer = setTimeout(() => {
+      diskActivity.settleTimer = null;
+      diskActivity.lastPost = Date.now();
+      self.clients.matchAll({ includeUncontrolled: true }).then(cs => {
+        for (const c of cs) {
+          c.postMessage({
+            type: "disk-activity",
+            pending: 0,
+            files: diskActivity.files,
+            bytes: diskActivity.bytes,
+            names: [],
+            idle: true,
+          });
+        }
+      }).catch(() => {});
+    }, BURST_SETTLE_MS);
+  }
+
+  if (force || since >= 250) {
+    if (diskActivity.timer) { clearTimeout(diskActivity.timer); diskActivity.timer = null; }
+    postDiskActivity();
+  } else if (!diskActivity.timer) {
+    diskActivity.timer = setTimeout(postDiskActivity, 250 - since);
+  }
+}
+
+function beginDiskRead() {
+  diskActivity.pending++;
+  scheduleDiskPost(false);
+}
+/** @param counted true once the chunk's bytes are known (cache hit or fetch). */
+function endDiskRead(counted, bytes, name) {
+  diskActivity.pending = Math.max(0, diskActivity.pending - 1);
+  if (counted) {
+    diskActivity.files++;
+    diskActivity.bytes += bytes || 0;
+    // Remember which chunk this was, for per-tool labelling. Cap the list so a
+    // long compile cannot grow it without bound between posts.
+    if (name && diskActivity.recent.length < 256) diskActivity.recent.push(name);
+  }
+  // The final "idle" message must always go out, or the indicator never hides.
+  scheduleDiskPost(diskActivity.pending === 0);
+}
+
+/* ---------- throughput probe, for deciding whether to prefetch ----------
+ *
+ * navigator.connection.effectiveType is Chromium-only, so prefetch cannot be
+ * gated on it. Instead measure what actually arrives: time the first few real
+ * chunk downloads in the worker and derive bytes/second. The page reads this
+ * with {type:"get-throughput"} when it is considering a prefetch.
+ *
+ * Only successful network fetches count. Cache hits cost nothing and would
+ * make a slow link look fast.
+ */
+const throughput = { samples: 0, bytes: 0, ms: 0 };
+
+function noteThroughput(bytes, ms) {
+  if (throughput.samples >= 10) return;   // enough to judge; stop measuring
+  if (!(bytes > 0) || !(ms > 0)) return;
+  throughput.samples++;
+  throughput.bytes += bytes;
+  throughput.ms += ms;
+}
+
+/** Estimated bytes/second, or null while there is not enough evidence yet. */
+function measuredThroughput() {
+  if (throughput.samples < 3 || throughput.ms <= 0) return null;
+  return throughput.bytes / (throughput.ms / 1000);
+}
+
+self.addEventListener("message", event => {
+  if (event.data && event.data.type === "get-throughput") {
+    const bps = measuredThroughput();
+    event.source && event.source.postMessage({
+      type: "throughput",
+      bps,
+      samples: throughput.samples,
+    });
+  }
+});
+
 self.addEventListener("fetch", event => {
   const { request } = event;
   const url = new URL(request.url);
@@ -156,6 +326,21 @@ self.addEventListener("fetch", event => {
   if (request.headers.has("range")) return;
 
   if (request.method === "HEAD") {
+    // Chunk HEADs must also reach the asset origin, never Pages.
+    if (CHUNK_RE.test(url.pathname)) {
+      event.respondWith((async () => {
+        await assetBaseReady;
+        const upstream = GL_ASSET_BASE
+          ? GL_ASSET_BASE + url.pathname
+          : request;
+        try {
+          return await fetch(upstream);
+        } catch (e) {
+          return new Response(null, { status: 404 });
+        }
+      })());
+      return;
+    }
     event.respondWith((async () => {
       const hit = await headFromCache(request.url);
       if (hit) return hit;
@@ -174,31 +359,47 @@ self.addEventListener("fetch", event => {
   // on-demand), else fetch and cache on demand. Offline misses fall back to the
   // empty chunk so v86's unbounded retry loop cannot hang the guest.
   if (CHUNK_RE.test(url.pathname)) {
-    // Cache key ignores the origin so a chunk fetched from R2 and one requested
-    // same-origin are the same entry. Rewriting happens only for the network
-    // fetch; the cache is keyed by the same-origin path.
-    const cacheKey = (GL_ASSET_BASE && sameOrigin)
-      ? new Request(self.location.origin + url.pathname, { method: "GET" })
-      : request;
-    const upstream = (GL_ASSET_BASE && sameOrigin)
-      ? GL_ASSET_BASE + url.pathname
-      : request;
-
     event.respondWith((async () => {
+      // Wait for the persisted ?assets= override (if any) before deciding where
+      // to fetch from, or a restarted worker would send this chunk to the
+      // production origin.
+      await assetBaseReady;
+
+      // Cache key ignores the origin so a chunk fetched from R2 and one
+      // requested same-origin are the same entry. The cache is always keyed by
+      // the same-origin path.
+      const cacheKey = new Request(self.location.origin + url.pathname,
+                                   { method: "GET" });
+      // ALWAYS fetch chunks from the asset origin when one is configured - not
+      // only when the request arrived same-origin. Otherwise a request that
+      // somehow bypassed the rewrite (or a stale absolute URL) would hit Pages.
+      const upstream = GL_ASSET_BASE
+        ? GL_ASSET_BASE + url.pathname
+        : request;
+
       for (const name of [GL_PACK_CACHE, GL_DATA_CACHE]) {
         const cache = await caches.open(name);
         const hit = await cache.match(cacheKey, { ignoreSearch: true });
-        if (hit) return hit;
+        if (hit) {
+          // A cache hit costs no network, so it is not reported as disk loading.
+          return hit;
+        }
       }
 
+      beginDiskRead();
+      const fetchStart = Date.now();
       try {
         const response = await fetch(upstream);
         if (response.ok) {
           const cache = await caches.open(GL_DATA_CACHE);
           cache.put(cacheKey, response.clone()).catch(() => {});
+          const len = Number(response.headers.get("Content-Length")) || 0;
+          // Throughput evidence for the prefetch decision (network only).
+          noteThroughput(len, Date.now() - fetchStart);
+          endDiskRead(true, len, url.pathname.split("/").pop());
           return response;
         }
-
+        endDiskRead(false, 0);
         // A 404 is only safe to paper over when the chunk is KNOWN to be a
         // zeroed region. Substituting zeros for a real data chunk would feed
         // the guest corrupt binaries, which is exactly the bug this guards
@@ -225,6 +426,9 @@ self.addEventListener("fetch", event => {
         // are known zeroed regions. For a real data chunk, serving zeros would
         // corrupt the guest silently, so report it instead and let the page
         // tell the user to reconnect or install an offline pack.
+        // Release the activity counter too, or a failed read would leave the
+        // "Loading from disk…" indicator stuck on forever.
+        endDiskRead(false, 0);
         const name = url.pathname.split("/").pop();
         const knownEmpty = await isEmptyChunkName(name);
 

@@ -1,0 +1,18 @@
+{
+  // Cloudflare Worker with static assets for golinux.app.
+  //
+  // This is a WORKER (Workers + Static Assets), not a Pages project. The
+  // dashboard name is "golinux"; it was renamed from "withered-boat-e970".
+  //
+  // No account_id and no secrets here on purpose: `wrangler login` supplies the
+  // account, and nothing in this file is sensitive. Do not add tokens.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "golinux",
+  "compatibility_date": "2026-11-23",
+
+  "assets": {
+    // Written by tools/deploy/build-pages.sh. Contains the app shell, wasm,
+    // kernel/initrd/snapshot and _headers; chunks and packs live on R2.
+    "directory": ".deploy-pages"
+  }
+}

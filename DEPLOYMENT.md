@@ -1,247 +1,259 @@
-# GoLinux — launch checklist
+# GoLinux — deploy guide (click-by-click)
 
-Everything below is manual on your side: I have not created any Cloudflare
-resources and no credentials are in this repo.
+Follow in order. **MANUAL** = you click in a dashboard. **SCRIPT** = you run a
+command in a terminal. Run all commands from the repo root.
 
----
+Names used throughout: domain **golinux.app**, R2 bucket **golinux-assets**,
+R2 domain **assets.golinux.app**, Worker **golinux**.
 
-## 0. What gets deployed where
-
-| Content | Where | Why |
-|---|---|---|
-| `index.html`, `*.js`, `sw.js`, `manifest.json`, `icons/` | Pages | small, versioned with the app |
-| `assets/v86/*.wasm`, `assets/xterm/*`, `assets/bios/*` | Pages | 2 MB total; must be same-origin for the SW |
-| `assets/empty-chunk.zst` | Pages | the SW's 404/offline fallback, precached with the shell |
-| `images/debian-{bzImage,initrd,state.bin.zst}` | Pages | ≤ 25 MiB each; needed before the disk |
-| `images/build-id.json` | Pages | never cached; detects incompatible saved states |
-| `images/debian-chunks/*.zst` (5,602 real) | **R2** | 222.8 MB, and 41k files would break the Pages 20,000-file limit |
-| `packs/*.json` | **R2** | only needed when the user opts into a pack |
-
-**The 35,358 empty chunks are not uploaded.** They are byte-identical zeroed
-blocks; v86 only ever reads them as empty regions. The service worker answers a
-404 for them with `assets/empty-chunk.zst`, which I verified by cold-booting
-with those files 404ing (`ls`, `gcc` both fine).
+> What lives where: R2 holds the disk chunks + packs (too many for a Worker's
+> asset count). The Worker serves everything else. The service worker fetches
+> chunks from R2.
 
 ---
 
-## 1. Cloudflare limits that matter (verified in the docs)
+## 0. Smoke test — REQUIRED before every deploy — SCRIPT
 
-| Limit | Value |
-|---|---|
-| Pages files per site | **20,000** (Free) |
-| Pages max single file | **25 MiB** |
-| Pages `_headers` rules | 100 |
-| Pages custom domains | 100 per project |
-| R2 free storage | **10 GB-month** |
-| R2 free Class A (writes) | **1,000,000/month** |
-| R2 free Class B (reads) | **10,000,000/month** |
-| R2 egress | **free** |
-| R2 objects per bucket | unlimited |
-| R2 custom domains per bucket | 100 |
+Nothing goes to the Worker or R2 until this passes. It exercises the **staged**
+output against a local stand-in for production: the app on one origin, and a
+mirror of exactly what `upload-r2.sh` uploads on a second (real
+`images/debian-chunks/<buildId>/` paths, 404 for the zeroed chunks). It uses no
+`?assets=` override and no credentials.
 
-Two important details:
+```sh
+./tools/deploy/build-pages.sh
+```
 
-- **`r2.dev` is not for production.** Cloudflare documents it as
-  rate-limited (hundreds of req/s → 429) and throttled. You need a custom
-  domain on the bucket.
-- **`.zst` is in Cloudflare's default cached-extension list**, so chunk
-  responses are edge-cached without a Cache Everything rule. **HTML and JSON
-  are not cached by default** — that is fine here, because the shell is
-  handled by the service worker and `packs/index.json` is deliberately
-  short-lived.
+`build-pages.sh` runs the smoke test as its final step. To run it on its own:
 
-The largest Pages file is `images/debian-initrd` at **24.18 MiB** — inside the
-25 MiB limit but with little headroom. If the initrd grows, move it to R2.
+```sh
+node tools/test/smoke-deploy.test.js --pages .deploy-pages
+```
+
+It drives a fresh headless Chrome through: first load → shell → a **cold**
+`gcc` compile (in its own fresh profile, since v86 caches chunks in RAM) →
+`ls` → `gcc --version` → write a file in `/root` → save → reload → the file is
+still there. It asserts the "Loading from disk" indicator appears and is labelled
+`gcc`, that every chunk request went to the asset origin with the build id in the
+path and returned 200, that none went to the app origin, and that no "out of
+date" overlay appeared.
+
+**You should see:** `PASS (0 failure(s))` and exit code 0. If it fails, do not
+deploy — fix the cause and rebuild. (`SKIP_SMOKE=1` skips it for a local build
+only; that output must never be deployed.)
 
 ---
 
-## 2. R2 setup (by hand)
+## 1. Cloudflare account + add the domain — MANUAL
 
-1. **Create the bucket**
-   Dashboard → R2 → *Create bucket* → name it e.g. `golinux-assets`.
-   Leave it private; a custom domain makes objects readable.
+1. Go to <https://dash.cloudflare.com/sign-up> and create a free account.
+2. In the dashboard click **Add a site** (top-right, or the big button on the
+   home screen). Type `golinux.app` → **Continue**.
+3. Pick the **Free** plan → **Continue**.
+4. Cloudflare scans DNS and shows a list of records. Leave them as-is →
+   **Continue**.
+5. It shows **two nameservers** like
+   `ada.ns.cloudflare.com` and `bob.ns.cloudflare.com`. **Copy both.**
 
-2. **Connect a custom domain** (required, not `r2.dev`)
-   Bucket → *Settings* → *Custom Domains* → *Connect Domain* →
-   `assets.yourdomain.com`. Cloudflare creates the DNS record automatically
-   if the zone is on your account. Wait for the certificate to show *Active*.
+**You should see:** the site listed with status **Pending Nameserver Update**.
 
-3. **Apply CORS** — the page is on a different origin, so chunk fetches need it.
+---
 
-   **REQUIRED before this step:** open `public/r2-cors.json` and replace the
-   `https://YOUR-PROJECT.pages.dev` placeholder with the real Pages origin
-   assigned to your project (shown in the Pages dashboard). `https://golinux.app`
-   is already listed. Skipping this makes chunk requests fail CORS, and the
-   machine will not boot on that origin.
+## 2. Nameservers at name.com — MANUAL
 
+1. Sign in at <https://www.name.com> → **My Domains** → click `golinux.app`.
+2. Open the **Nameservers** (or **Manage DNS**) panel.
+3. Choose **Use custom nameservers** (not name.com's default DNS).
+4. Delete the existing entries, paste the **two Cloudflare nameservers** from
+   step 1 → **Save**.
+
+**You should see:** name.com says nameservers updated. Back in Cloudflare the
+site flips to **Active** (usually minutes, up to 24 h). Wait for **Active**
+before continuing — R2's custom domain and the Worker's domain need it.
+
+---
+
+## 3. R2 bucket + API token — MANUAL
+
+1. Dashboard left sidebar → **R2 Object Storage** → **Create bucket**.
+2. Name it `golinux-assets`. Leave **Public access** off →
+   **Create bucket**.
+   *(R2 asks for a payment method on file even on the free tier.)*
+3. Left sidebar → **R2** → **Manage R2 API Tokens** → **Create API token**.
+4. Token name `golinux-upload`. Permissions: **Object Read & Write**.
+   Scope: **Only specific bucket** → `golinux-assets` →
+   **Create API Token**.
+5. The next screen shows **Access Key ID**, **Secret Access Key**, and the
+   **Account ID** (also on the R2 overview page). **Copy all three now** — the
+   secret is shown only once.
+
+**You should see:** the bucket in the R2 list, and the token under
+*Manage R2 API Tokens*.
+
+---
+
+## 4. Custom domain for R2 — MANUAL
+
+1. **R2** → click bucket `golinux-assets` → **Settings** tab →
+   **Custom Domains** → **Connect Domain**.
+2. Type `assets.golinux.app` → **Connect Domain**.
+
+**You should see:** the domain listed, status **Active** shortly after
+(Cloudflare creates the DNS record itself because the zone is on your account).
+
+> Do **not** use the `r2.dev` link — it is rate-limited and not for production.
+
+---
+
+## 5. CORS — MANUAL then SCRIPT
+
+Chunks are fetched cross-origin (page on `golinux.app`, files on
+`assets.golinux.app`), so the bucket needs a CORS rule.
+
+1. **MANUAL:** open `public/r2-cors.json`. It already allows
+   `https://golinux.app`, which is the live site, so nothing else is needed.
+   Save.
+2. **SCRIPT:** run once, then apply the rule:
    ```sh
+   npx wrangler login                       # opens a browser, click Allow
    npx wrangler r2 bucket cors set golinux-assets --file public/r2-cors.json
-   npx wrangler r2 bucket cors list golinux-assets   # verify the origins
+   npx wrangler r2 bucket cors list golinux-assets
    ```
 
-4. **Create an API token for uploads**
-   R2 → *Manage R2 API Tokens* → *Create API token* → permission
-   **Object Read & Write**, scoped to this bucket. Note the Access Key ID and
-   Secret Access Key — they are shown once.
+**You should see:** the list command prints a rule containing
+`https://golinux.app`.
 
-5. **Export the credentials in your shell** (never commit them):
+---
+
+## 6. Upload the chunks — SCRIPT
+
+1. Install the AWS CLI once (the uploader uses the S3 API, not wrangler):
    ```sh
-   export R2_ACCOUNT_ID=...
+   brew install awscli
+   ```
+2. Export your credentials in **this terminal** (from step 3; never commit
+   them):
+   ```sh
+   export R2_ACCOUNT_ID=...        # Account ID
    export R2_BUCKET=golinux-assets
    export R2_ACCESS_KEY_ID=...
    export R2_SECRET_ACCESS_KEY=...
    ```
+3. **Dry run first:**
+   ```sh
+   ./tools/deploy/upload-r2.sh --dry-run
+   ```
+   **You should see:** `build id: <16 hex>` and
+   `chunks: 5601 files, ~234 MB`, then `DRY RUN: nothing was uploaded.`
+4. **Upload for real:**
+   ```sh
+   ./tools/deploy/upload-r2.sh
+   ```
+   **You should see:** `Uploaded.` and a short "Next:" list.
 
 ---
 
-## 2b. How chunk URLs are versioned
+## 7. Deploy the site — SCRIPT
 
-Chunk filenames are positional (`chunk-<start>-<end>.zst`), so a rebuild gives
-the **same names with different bytes**. Serving those under
-`Cache-Control: immutable` would let the CDN and browsers keep handing out the
-previous build's chunks — silent corruption (observed offline as
-`invalid ELF header`).
+The site is a **Cloudflare Worker with static assets**, not a Pages project.
+`wrangler.jsonc` in the repo names it `golinux` and points at `.deploy-pages`.
 
-Every build therefore gets its own path:
-
-```
-images/debian-chunks/<buildId>/chunk-<start>-<end>.zst
-packs/<buildId>/common.json
-```
-
-`<buildId>` is a **content hash** of the served files (chunks + kernel + initrd
-+ wasm), so identical contents produce an identical id and a no-op rebuild is
-a true no-op. `tools/deploy/stamp-build-id.sh` writes it into
-`packs-config.js` (`GL_BUILD_ID`), which derives `GL_CHUNK_PATH` and
-`GL_PACKS_PATH`. Local dev leaves it empty and uses flat paths.
-
----
-
-## 3. Deploy the chunks and packs
+One-time setup, yours to run (this script never logs in for you):
 
 ```sh
-brew install awscli        # one-off; needs the aws CLI, not wrangler
-./tools/deploy/upload-r2.sh --dry-run    # shows counts, uploads nothing
-./tools/deploy/upload-r2.sh              # uploads 5,603 chunks + 3 pack files
+npx wrangler login
 ```
 
-I used the **S3 API rather than wrangler** because Cloudflare's own docs say
-`wrangler r2 object put` "only allows one object at a time" and recommend an
-S3-compatible tool for bulk. With ~5,600 objects, one process each is not
-workable. `aws s3 sync` also skips unchanged files, so re-deploys are cheap.
+Then every deploy is:
 
----
+```sh
+./tools/deploy/deploy-site.sh
+```
 
-## 4. Point the app at the asset origin
+It refuses a build whose smoke test was skipped (`SKIP_SMOKE`), builds with the
+required smoke test, prints the build id / `sw.js` sha256 / file count and size,
+checks you are logged in, asks `Deploy build <id> to golinux.app? [y/N]`, runs
+`npx wrangler deploy`, then verifies the live site with cache-busted requests
+(retried): `sw.js` matches the local hash, `packs-config.js` has
+`GL_ASSET_ORIGIN https://assets.golinux.app`, `chunks-precache.json` returns
+200, `sw.js` is `no-cache`, and both `packs/<buildId>/tools.json` and a real
+chunk on `assets.golinux.app` return 200 with
+`access-control-allow-origin: https://golinux.app`.
 
-Edit **one line** in `packs-config.js`:
+`--dry-run` does everything except the deploy and the live checks.
+
+**You should see:** `Deployed build <id> and verified https://golinux.app.`
+
+**Before the first deploy**, `packs-config.js` must point at R2 (checked
+automatically by the script):
 
 ```js
-const PL_ASSET_ORIGIN = "https://assets.yourdomain.com";
+const GL_ASSET_ORIGIN = "https://assets.golinux.app";
 ```
 
-This is the single source for the asset base. The service worker proxies chunk
-requests to it — the page itself always requests chunks same-origin, because
-v86's `use_parts` derives filenames by splitting the URL on the *last dot*,
-which mangles any absolute URL that has dots in the hostname.
-
-Then rebuild and deploy the app:
-
-```sh
-./tools/deploy/build-pages.sh          # writes .deploy-pages, validates limits
-npx wrangler pages deploy .deploy-pages --project-name golinux
-```
+If you skip that, every chunk is requested from the site, 404s, and the machine
+will not boot.
 
 ---
 
-## 5. DNS
+## 8. The golinux.app domain — MANUAL (already set up)
 
-| Record | Name | Target |
-|---|---|---|
-| Pages custom domain | `golinux.yourdomain.com` | Pages → *Custom domains* → add; Cloudflare creates the CNAME |
-| R2 asset domain | `assets.yourdomain.com` | created in step 2.2 |
+The Worker is already named `golinux` in the dashboard (renamed from
+`withered-boat-e970`) and `golinux.app` is bound to it. Nothing to do per
+deploy.
 
-Both must be **proxied (orange cloud)** so caching and HTTPS apply.
+If you ever re-point it: **Workers & Pages → golinux → Settings → Domains &
+Routes → Add → Custom domain** → `golinux.app`, then **Add** →
+`www.golinux.app` if wanted. Cloudflare creates the DNS records.
 
----
-
-## 6. Verify after deploy
-
-```sh
-curl -sI https://assets.yourdomain.com/images/debian-chunks/chunk-0-131072.zst
-#   expect 200, content-type: application/zstd,
-#   cache-control: public, max-age=31536000, immutable,
-#   access-control-allow-origin: https://your-app-domain
-
-curl -sI https://your-app-domain/sw.js
-#   expect cache-control: no-cache, no-store, must-revalidate
-
-curl -sI https://your-app-domain/images/build-id.json
-#   expect cache-control: no-store
-```
-
-Then in a browser: hard-reload, confirm the shell appears, check DevTools →
-Network that chunk requests go to `assets.…` and return 200, and run
-`gcc --version`.
+**You should see:** the domain listed as **Active**.
 
 ---
 
-## 7. Rollback
+## 9. Final check on your phone — MANUAL
 
-Because each build lives at its own path, rollback is a pointer change — nothing
-is deleted, and users on the bad build keep working throughout.
+On your phone (mobile data, **not** your office Wi-Fi, so it is a real test):
 
-**Roll back the app to the previous build:**
-```sh
-./tools/deploy/stamp-build-id.sh <previous-build-id>   # e.g. from R2 listing
-npx wrangler pages deploy .deploy-pages --project-name golinux
-```
-Take `<previous-build-id>` from the R2 prefixes:
-```sh
-aws --endpoint-url https://<account-id>.r2.cloudflarestorage.com s3 ls \
-  s3://golinux-assets/images/debian-chunks/
-```
-The previous prefix still holds its chunks and packs, so the old app boots
-immediately.
+1. Open `https://golinux.app`. **Expect:** a terminal prompt within a few
+   seconds (`root@golinux:~#`).
+2. Type `ls`, then `gcc --version`. **Expect:** normal output, no errors.
+3. Type `echo 'int main(){return 0;}' > t.c && gcc t.c -o t && ./t && echo OK`.
+   **Expect:** `OK`. (This reads many chunks; a failure here means CORS or the
+   chunk path is wrong.)
+4. Rotate the phone or lock/unlock the screen, then return to the tab.
+   **Expect:** the session is still there.
+5. In desktop DevTools → **Network**, filter `chunk`. **Expect:** requests to
+   `assets.golinux.app` returning `200`.
 
-**Roll back a Pages-only change** (no image change): Pages → *Deployments* →
-pick the previous deployment → *Rollback*. Deployments are kept 30 days plus
-your 100 most recent.
+---
 
-**Retention: keep the last 3 builds.** There is no automatic deletion anywhere
-in `upload-r2.sh` — deliberately. Never remove a build while clients may still
-be running it:
+## After launch: updates, rollback, retention — SCRIPT
 
-> **Do not delete a build until at least a day after its successor has gone
-> live.** Users with the old app open, and cached chunk URLs (up to a year of
-> `immutable`), will 404 if the prefix disappears.
+- **Redeploy after a code change:** re-run step 7's two commands.
+- **After re-recording packs or `tools.json`, ALWAYS do both:**
+  1. re-upload them: `./tools/deploy/upload-r2.sh`
+  2. **bump `GL_VERSION` in `packs-config.js`**
 
-To prune, list the prefixes and delete explicitly, oldest first:
-```sh
-aws --endpoint-url https://<account-id>.r2.cloudflarestorage.com s3 ls \
-  s3://golinux-assets/images/debian-chunks/
-# then, for a build that is older than the newest three:
-aws --endpoint-url https://<account-id>.r2.cloudflarestorage.com s3 rm \
-  s3://golinux-assets/images/debian-chunks/<old-id> --recursive
-aws --endpoint-url https://<account-id>.r2.cloudflarestorage.com s3 rm \
-  s3://golinux-assets/packs/<old-id> --recursive
-```
-Each build is ~223 MB; the 10 GB free tier holds about 40, so three is
-comfortable.
+  Pack lists live at `packs/<buildId>/` and the build id comes from the *disk
+  image*, so re-recording packs does not change their URL. Uploading replaces
+  the bytes, and the `GL_VERSION` bump changes the shell/pack cache names so
+  clients stop reusing the old cached copies. Skipping either step leaves stale
+  packs being served. (Long-term fix: content-hashed pack names — see
+  `TODO.md`.)
 
-**Saved user states** are refused automatically when the build id changes
-(`images/build-id.json` vs the stored `meta.json`), with a message telling the
-user their old files are unavailable and to use *Download /root* next time.
+- **After changing any guest tool or the image:** re-record the per-tool sets
+  with `node tools/image/build-tool-sets.js` (they drive the `Loading gcc…`
+  bar and prefetch), then rebuild, re-upload, and bump `GL_VERSION` as above.
+- **New disk image:** re-run `build.sh`, `build-snapshot.sh`, re-record packs,
+  then steps 6 and 7. Each build lands at its own `…/<build-id>/` path.
+- **Rollback the app:** `./tools/deploy/stamp-build-id.sh <previous-id>`, then
+  `./tools/deploy/deploy-site.sh`. Or
+  **Workers & Pages → golinux → Deployments → previous version → Rollback**.
+- **Retention:** keep the last **3** builds in R2. Deletion is manual — there is
+  no auto-delete. **Never delete a build until at least a day after its
+  successor is live** (open clients and year-long `immutable` caches will 404).
+  Prune explicitly with `aws s3 rm s3://golinux-assets/images/debian-chunks/<old-id> --recursive`
+  and the matching `packs/<old-id>` prefix.
 
-## 8. Cost expectations
-
-| | Per session | Free tier allows |
-|---|---|---|
-| Boot only (snapshot restores; 0 chunks) | 0 reads | unlimited |
-| `gcc` + one compile | ~269 reads | ~37,000 sessions/month |
-| Common tools session | ~683 reads | ~14,600 sessions/month |
-| Full pack session | ~5,602 reads | ~1,800 sessions/month |
-
-Storage: 222.8 MB against a 10 GB-month free tier. Egress is free. The likely
-first limit is **Class B reads** if most visitors install the full pack; the
-common pack is ~8× cheaper per session.
+Cost is dominated by R2 **Class B reads**; the common pack is ~8× cheaper per
+session than the full pack.

@@ -74,6 +74,8 @@ const MOTD_LINES = [
   "      cp /mnt/host/file.txt /root/",
   "  Files under /root are included in Download /root as zip.",
   "",
+  "  First use of a program takes a while to load; later uses are fast.",
+  "",
 ];
 const MOTD = "printf '%s\\n' " +
   MOTD_LINES.map(l => "'" + l.replace(/'/g, "'\\''") + "'").join(" ") +

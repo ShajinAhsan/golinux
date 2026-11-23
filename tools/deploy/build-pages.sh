@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Assemble the static directory that Cloudflare Pages serves.
+# Assemble the static directory the golinux WORKER serves (static assets).
 #
 #   ./tools/deploy/build-pages.sh [outdir]     (default: .deploy-pages)
 #
 # Layout produced:
 #   index.html, manifest.json, *.js      app shell
-#   sw.js, _headers                      worker + cache rules
+#   sw.js, _headers                      app worker + header rules
 #   assets/                              wasm, xterm, BIOS
 #   icons/
 #   images/                              kernel, initrd, snapshot, build-id
 #
 # Deliberately excluded:
-#   images/debian-chunks/    -> R2 (41k files; Pages Free allows 20,000)
+#   images/debian-chunks/    -> R2 (41k files; the Worker allows 20,000 free)
 #   packs/                   -> R2
 #   images/debian.img        -> 5 GiB; only the chunks are served
 set -euo pipefail
@@ -20,8 +20,12 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 OUT="${1:-$ROOT/.deploy-pages}"
 
-LIMIT_BYTES=$((25 * 1024 * 1024))   # Cloudflare Pages maximum file size
-LIMIT_FILES=20000                    # Cloudflare Pages Free file count
+# Cloudflare Workers static assets limits (verified 2026-11-23):
+#   - 25 MiB per file, all plans
+#   - 20,000 files per Worker version on the free plan; 100,000 on paid
+#     (paid requires Wrangler >= 4.34.0). 20,000 is the safe floor to enforce.
+LIMIT_BYTES=$((25 * 1024 * 1024))
+LIMIT_FILES=20000
 
 # REFUSE TO SHIP FLAT PATHS. Checked BEFORE any copying so a missing or empty
 # build id fails with a clear message instead of a bare cp error. An empty
@@ -62,6 +66,16 @@ cp "$ROOT"/assets/v86/libv86.js "$ROOT"/assets/v86/v86.wasm \
    "$ROOT"/assets/v86/v86-fallback.wasm "$OUT/assets/v86/"
 # Needed by the service worker's 404 / offline fallback.
 cp "$ROOT"/images/debian-chunks/empty-chunk.zst "$OUT/assets/empty-chunk.zst"
+# The worker fetches this from the APP origin (not R2) to tell a zeroed chunk
+# from a real one. Without it, every empty-chunk 404 is treated as a real chunk
+# loss and the machine stops with "this version is out of date".
+if [ ! -f "$ROOT/chunks-precache.json" ]; then
+  echo "ERROR: chunks-precache.json is missing — the service worker needs it to" >&2
+  echo "       distinguish zeroed chunks from real ones." >&2
+  echo "       Run: node tools/image/build-chunk-manifest.js" >&2
+  exit 1
+fi
+cp "$ROOT/chunks-precache.json" "$OUT"/chunks-precache.json
 cp "$ROOT"/images/debian-bzImage "$ROOT"/images/debian-initrd \
    "$ROOT"/images/debian-state.bin.zst "$ROOT"/images/build-id.json "$OUT/images/"
 
@@ -93,7 +107,7 @@ echo "   stamped GL_BUILD_ID = $BUILD_ID"
 # id, so a flat unversioned deploy cannot leave this script.
 node "$ROOT/tools/image/verify-manifests.js" --deploy --config "$OUT/packs-config.js"
 
-echo "== Pages output: $OUT =="
+echo "== Assets output: $OUT =="
 
 # Fail loudly on the two limits that would break a deploy.
 python3 - "$OUT" "$LIMIT_BYTES" "$LIMIT_FILES" <<'PY'
@@ -122,5 +136,20 @@ if bad:
 if len(files) > limit_files:
     print(f"\nERROR: {len(files)} files exceeds the {limit_files} file limit")
     sys.exit(1)
-print("\n  all files within Cloudflare Pages limits")
+print(f"\n  all files within Workers static-asset limits "
+      f"(25 MiB/file, {limit_files} files)")
 PY
+
+# REQUIRED before any deploy: drive the staged output through a real headless
+# browser against a local mirror of R2 (real versioned chunk paths, 404 for
+# zeroed chunks). Catches the exact class of bug that only shows up in
+# production: wrong asset origin, a chunk regex that ignores the build id, a
+# missing precache list. Skips only when explicitly asked (local builds).
+if [ "${SKIP_SMOKE:-0}" = "1" ]; then
+  echo
+  echo "!! SKIPPED the deploy smoke test (SKIP_SMOKE=1). Do not deploy this output."
+else
+  echo
+  echo "== Deploy smoke test (required) =="
+  node "$ROOT/tools/test/smoke-deploy.test.js" --pages "$OUT"
+fi

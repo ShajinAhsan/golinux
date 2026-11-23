@@ -18,7 +18,11 @@ const GL_VERSION = "v13";
  *
  * It can also be overridden per-load with ?assets=https://... which is what the
  * two-origin test harness uses. */
-const GL_ASSET_ORIGIN = "";
+const GL_ASSET_ORIGIN = "https://assets.golinux.app";
+
+/* localStorage key for a LOCAL-only ?assets= override. Host-guarded on read, so
+ * it can never affect a production visitor. */
+const GL_LOCAL_OVERRIDE_KEY = "golinux.assets.override";
 
 /* Resolved at load time; everything else must use this, not the raw constant.
  *
@@ -29,7 +33,20 @@ let GL_ASSET_BASE = (function () {
   try {
     if (typeof location !== "undefined" && location.search) {
       const q = new URLSearchParams(location.search).get("assets");
-      if (q) return q.replace(/\/+$/, "");
+      if (q) {
+        const base = q.replace(/\/+$/, "");
+        // Remember it for this browser only (host-scoped, never in the build
+        // output) so local testing does not need the query string every time.
+        try { localStorage.setItem(GL_LOCAL_OVERRIDE_KEY, base); } catch (e) {}
+        return base;
+      }
+    }
+    // Local dev only: reuse a previously supplied ?assets= override. Guarded by
+    // hostname so a production visitor can never be redirected by stored state.
+    const isLocal = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+    if (isLocal) {
+      const saved = localStorage.getItem(GL_LOCAL_OVERRIDE_KEY);
+      if (saved) return saved.replace(/\/+$/, "");
     }
   } catch (e) { /* not a page context */ }
   return (GL_ASSET_ORIGIN || "").replace(/\/+$/, "");
@@ -115,3 +132,25 @@ function glIsChunkUrl(url) {
 
 // localStorage key remembering which pack is installed.
 const GL_PACK_KEY = "golinux.pack";
+
+/* ---------- prefetch of a tool's chunk set ----------
+ *
+ * MEASURED, not guessed. gcc first compile, cold profile, 4 Mbps / 150 ms link:
+ *   no prefetch 38.0 s | prefetch c=4 17.2 s | prefetch c=8 12.6 s
+ * and on a fast link prefetch is a NET LOSS (3.4 s -> 4.6-4.8 s), because the
+ * same bytes finish sooner when the compile asks for them in its own order.
+ *
+ * So prefetch only pays on slow links. Gate on MEASURED throughput from the
+ * service worker (navigator.connection.effectiveType is Chromium-only, so it is
+ * not used): below GL_PREFETCH_MIN_BPS it is worth doing.
+ *
+ * Threshold: the slow test link delivered ~4 Mbps. The fast link delivered far
+ * more. 1.5 MB/s (~12 Mbps) sits well between them and marks links slow enough
+ * for prefetch to win.
+ *
+ * Set GL_PREFETCH = false to disable the whole feature with one switch.
+ */
+const GL_PREFETCH = true;
+const GL_PREFETCH_MIN_BPS = 1.5 * 1024 * 1024;
+const GL_PREFETCH_CONCURRENCY = 4;
+const GL_PREFETCH_CAP_BYTES = 16 * 1024 * 1024;

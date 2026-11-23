@@ -9,6 +9,10 @@
 #   R2_BUCKET        bucket name, e.g. golinux-assets
 #   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY   R2 API token credentials
 #
+# These are mapped to the AWS_* names the aws CLI actually reads, so you do not
+# need to export both sets. AWS_DEFAULT_REGION is set to "auto" (R2's value) and
+# every aws call passes --endpoint-url explicitly.
+#
 # Why the S3 API and not wrangler: Cloudflare's own docs state that
 # `wrangler r2 object put` "only allows one object at a time" and recommend an
 # S3-compatible tool for bulk uploads (docs.cloudflare.com/r2/objects/upload-objects/).
@@ -42,14 +46,25 @@ done
 need() { [ -n "${!1:-}" ] || { echo "missing env var $1" >&2; exit 1; }; }
 
 # A dry run must work on a machine with no credentials and no aws CLI, so it
-# can be used to check what would be uploaded.
+# can be used to check what would be uploaded. A real upload requires all four
+# R2_* variables, checked individually so the message names the empty one.
 if [ "$DRY_RUN" -eq 0 ]; then
-  need R2_ACCOUNT_ID; need R2_BUCKET; need R2_ACCESS_KEY_ID; need R2_SECRET_ACCESS_KEY
+  for v in R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
+    [ -n "${!v:-}" ] || { echo "ERROR: $v is empty or unset." >&2; exit 1; }
+  done
   command -v aws >/dev/null || { echo "aws CLI not found (brew install awscli)" >&2; exit 1; }
 elif ! command -v aws >/dev/null; then
   echo "NOTE: aws CLI not installed; cannot show the exact sync plan."
   echo "      Staged file counts above are what would be uploaded."
 fi
+
+# The aws CLI reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, not the R2_*
+# names, so map them here. Nothing is echoed: these must never be printed.
+if [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ]; then
+  export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+  export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+fi
+export AWS_DEFAULT_REGION=auto
 
 ENDPOINT="https://${R2_ACCOUNT_ID:-<account-id>}.r2.cloudflarestorage.com"
 
@@ -77,10 +92,10 @@ CHUNK_COUNT=$(ls -1 "$STAGE/images/debian-chunks" | wc -l | tr -d ' ')
 CHUNK_BYTES=$(du -sk "$STAGE/images/debian-chunks" | cut -f1)
 echo "  chunks: $CHUNK_COUNT files, ~$((CHUNK_BYTES / 1024)) MB"
 
-# Types matter: a wrong Content-Type on .zst or .json breaks parsing.
+# Every aws call passes --endpoint-url explicitly (never rely on config), and
+# the region comes from AWS_DEFAULT_REGION=auto set above.
 aws_flags=(
   --endpoint-url "$ENDPOINT"
-  --region auto
 )
 
 # Build id: every upload goes under its own prefix, so a build's URLs are
@@ -132,14 +147,32 @@ aws "${aws_flags[@]}" s3 sync "$STAGE/images/debian-chunks" \
   --only-show-errors \
   $( [ "$DRY_RUN" -eq 1 ] && echo "--dryrun" )
 
-echo "== Sync packs =="
-aws "${aws_flags[@]}" s3 sync "$STAGE/packs" \
-  "s3://${R2_BUCKET:-<bucket>}/packs/$BUILD_ID" \
-  --exclude "*" --include "*.json" \
-  --cache-control "public, max-age=300" \
-  --content-type "application/json" \
-  --only-show-errors \
-  $( [ "$DRY_RUN" -eq 1 ] && echo "--dryrun" )
+# Packs are the pack LISTS (index/common/full/tools), a handful of small JSON
+# files. They are NOT immutable: they are re-recorded whenever packs or tool
+# sets change, without the build id changing. 1 hour, must-revalidate.
+#
+# `aws s3 sync` skips files whose size/mtime are unchanged, so it would leave a
+# stale Cache-Control on objects it does not re-upload. Each pack file is
+# therefore copied explicitly with `aws s3 cp`, which always PUTs and therefore
+# always applies the new metadata. There are only ever a few of these.
+PACK_CACHE_CONTROL="public, max-age=3600, must-revalidate"
+
+echo "== Upload packs (always re-uploaded, so the header is applied) =="
+shopt -s nullglob
+pack_files=("$STAGE"/packs/*.json)
+shopt -u nullglob
+[ "${#pack_files[@]}" -gt 0 ] || { echo "ERROR: no pack files staged" >&2; exit 1; }
+
+for f in "${pack_files[@]}"; do
+  base="$(basename "$f")"
+  echo "  $base"
+  aws "${aws_flags[@]}" s3 cp "$f" \
+    "s3://${R2_BUCKET:-<bucket>}/packs/$BUILD_ID/$base" \
+    --cache-control "$PACK_CACHE_CONTROL" \
+    --content-type "application/json" \
+    --only-show-errors \
+    $( [ "$DRY_RUN" -eq 1 ] && echo "--dryrun" )
+done
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo
@@ -150,6 +183,8 @@ else
   echo "Uploaded. Next:"
   echo "  1. Check the bucket is served from your custom domain, not r2.dev"
   echo "     (r2.dev is rate-limited and not for production)."
-  echo "  2. Set PL_ASSET_ORIGIN in packs-config.js to that domain."
-  echo "  3. Re-deploy the app origin."
+  echo "  2. Confirm GL_ASSET_ORIGIN in packs-config.js is that asset domain"
+  echo "     (it must be https://assets.golinux.app in production)."
+  echo "  3. Deploy the site with ./tools/deploy/deploy-site.sh — it rebuilds,"
+  echo "     runs the required smoke test, then deploys the golinux Worker."
 fi

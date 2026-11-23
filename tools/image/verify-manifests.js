@@ -71,6 +71,43 @@ if (!fs.existsSync(INDEX)) {
   }
   if (missing > 3) fail(`... and ${missing - 3} more missing chunks in packs/common.json`);
   if (!missing) notes.push(`all ${expected.length} common chunks present`);
+
+  // ---- per-tool sets: packs/<buildId>/tools.json -------------------------
+  // The page uses these for the per-tool progress bar. A missing or stale file
+  // means the bar silently never appears, so check it against the build id.
+  const TOOLS = path.join(ROOT, "packs", "tools.json");
+  if (!fs.existsSync(TOOLS)) {
+    fail("packs/tools.json is missing — run: node tools/image/build-tool-sets.js");
+  } else {
+    let tools = null;
+    try { tools = JSON.parse(fs.readFileSync(TOOLS, "utf8")); } catch (e) {
+      fail("packs/tools.json is not valid JSON");
+    }
+    if (tools) {
+      const ids = Object.keys(tools);
+      if (!ids.length) fail("packs/tools.json defines no tools");
+      let badChunk = null;
+      for (const id of ids) {
+        const t = tools[id];
+        if (!t || !Array.isArray(t.chunks) || !t.chunks.length) {
+          fail(`packs/tools.json entry '${id}' has no chunks`);
+          continue;
+        }
+        for (const c of t.chunks) {
+          if (!fs.existsSync(path.join(CHUNKS, c))) {
+            badChunk = badChunk || `${id}: ${c}`;
+            break;
+          }
+        }
+      }
+      if (badChunk) {
+        fail(`packs/tools.json references a missing chunk (${badChunk}) — ` +
+          "re-record with node tools/image/build-tool-sets.js");
+      } else {
+        notes.push(`tool sets ok (${ids.length} tools: ${ids.join(", ")})`);
+      }
+    }
+  }
 }
 
 // ---- build id must match the files it fingerprints ---------------------
@@ -131,6 +168,20 @@ if (!fs.existsSync(configPath)) {
       } catch (e) {
         fail("images/build-id.json is unreadable; cannot verify GL_BUILD_ID");
       }
+    }
+
+    // The asset origin is what every chunk fetch is proxied to. A blank or
+    // wrong value ships a deploy whose disk cannot load, so pin it exactly.
+    const REQUIRED_ASSET_ORIGIN = "https://assets.golinux.app";
+    const a = config.match(/^const GL_ASSET_ORIGIN\s*=\s*"([^"]*)";/m);
+    if (!a) {
+      fail("packs-config.js has no GL_ASSET_ORIGIN line (deploy requires it)");
+    } else if (a[1] !== REQUIRED_ASSET_ORIGIN) {
+      fail(`GL_ASSET_ORIGIN is '${a[1]}' in the staged config; a deploy must ` +
+        `be exactly '${REQUIRED_ASSET_ORIGIN}'. Local ?assets= overrides must ` +
+        `not leak into the build.`);
+    } else {
+      notes.push(`deploy asset origin ${a[1]}`);
     }
   }
 }
