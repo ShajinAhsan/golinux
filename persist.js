@@ -206,16 +206,34 @@
     }
 
     if (typeof tmp.createWritable === "function" && typeof tmp.move === "function") {
-      const w = await tmp.createWritable();
       try {
-        await w.write(new Blob([buf]));
-        await w.close();
-      } catch (e) {
-        try { await w.abort(); } catch (_) {}
-        throw e;
+        const w = await tmp.createWritable();
+        try {
+          await w.write(new Blob([buf]));
+          await w.close();
+        } catch (e) {
+          try { await w.abort(); } catch (_) {}
+          throw e;
+        }
+        try {
+          // Safari/WebKit requires move(destinationDir, newName) (2 args);
+          // Chrome/Edge also accept 2 args. Fall back to 1-arg move(newName)
+          // only if a runtime rejects the 2-arg form with TypeError.
+          await tmp.move(dir, fileName);
+        } catch (moveErr) {
+          if (moveErr instanceof TypeError) {
+            await tmp.move(fileName);
+          } else {
+            throw moveErr;
+          }
+        }
+        return;
+      } catch (writableErr) {
+        const n = writableErr && writableErr.name;
+        if (n !== "TypeError" && n !== "NotSupportedError") {
+          throw writableErr;
+        }
       }
-      await tmp.move(fileName);
-      return;
     }
 
     // Cleanup unused .tmp handle best-effort, then write via SyncAccessHandle worker.

@@ -68,12 +68,12 @@ function loadPersist({ buildId = "aaaaaaaaaaaaaaaa", stateSchema = 2, storage, w
   );
 }
 
-function makeFakeOpfs() {
+function makeFakeOpfs(opts = {}) {
   const files = new Map();
   const dirHandle = {
-    async getFileHandle(name, opts) {
+    async getFileHandle(name, fhOpts) {
       if (!files.has(name)) {
-        if (opts && opts.create) files.set(name, new Uint8Array(0));
+        if (fhOpts && fhOpts.create) files.set(name, new Uint8Array(0));
         else throw Object.assign(new Error("not found: " + name), { name: "NotFoundError" });
       }
       return {
@@ -92,7 +92,16 @@ function makeFakeOpfs() {
             async abort() {},
           };
         },
-        async move(target) {
+        async move(dirOrName, maybeName) {
+          if (opts.safariStrictTwoArgMove) {
+            if (arguments.length < 2 || dirOrName !== dirHandle || typeof maybeName !== "string") {
+              throw new TypeError("Not enough arguments");
+            }
+            files.set(maybeName, files.get(name));
+            files.delete(name);
+            return;
+          }
+          const target = typeof dirOrName === "string" ? dirOrName : maybeName;
           files.set(target, files.get(name));
           files.delete(name);
         },
@@ -144,6 +153,14 @@ async function testPersistDirtySeqAndReset() {
   const ok = await gp.saveNow(emu, "manual");
   check(ok === true, "persist: manual save succeeds");
   check(gp.isDirty() === true, "persist: edits during async save keep isDirty()=true (BUG-14)");
+
+  // Safari/WebKit strictly requires 2-arg move(dirHandle, fileName); 1-arg throws TypeError("Not enough arguments").
+  const safariOpfs = makeFakeOpfs({ safariStrictTwoArgMove: true });
+  const gpSafari = loadPersist({ buildId: "abcdef0123456789", stateSchema: 2, storage: safariOpfs.storage });
+  await gpSafari.claimOwnership();
+  const safariOk = await gpSafari.saveNow({ async save_state() { return new ArrayBuffer(32); } }, "manual");
+  check(safariOk === true && safariOpfs.files.has("state.gz") && safariOpfs.files.has("meta.json"),
+    "persist: Safari strict 2-arg OPFS move(dir, fileName) saves cleanly");
 
   // Reset latch must disarm any subsequent saveNow (e.g., pagehide during reload, BUG-15).
   await gp.clearUserState();
