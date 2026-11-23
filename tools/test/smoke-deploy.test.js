@@ -568,6 +568,13 @@ async function launchChrome(profileDir, port) {
     await cdp.send("Network.emulateNetworkConditions", {
       offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
     });
+    await cdp.send("Runtime.evaluate", { expression: `window.dispatchEvent(new Event("online"))` });
+    await sleep(100);
+    const bannerAfterOnline = (await cdp.send("Runtime.evaluate", {
+      expression: `document.getElementById("offlineBanner").classList.contains("visible")`,
+      returnByValue: true,
+    })).result.value;
+    check(bannerAfterOnline === false, "#offlineBanner hides automatically when internet reconnects");
 
     /* --- 10. Network assertions --- */
     console.log("\n== network assertions ==");

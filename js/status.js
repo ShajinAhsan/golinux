@@ -71,6 +71,12 @@ export function showOfflineBanner() {
   if (el) el.classList.add("visible");
 }
 
+export function hideOfflineBanner() {
+  bannerDismissed = false;
+  const el = $("offlineBanner");
+  if (el) el.classList.remove("visible");
+}
+
 export function setupStatusChrome() {
   const reloadBtn = $("fatalReload");
   if (reloadBtn) reloadBtn.onclick = () => location.reload();

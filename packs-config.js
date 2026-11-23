@@ -11,7 +11,7 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v15";
+const GL_VERSION = "v16";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
  * (e.g. virtio_console, memory_size) changes so incompatible saved OPFS states

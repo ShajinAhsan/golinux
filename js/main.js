@@ -7,6 +7,7 @@
 import {
   clearLoading,
   handleDiskActivity,
+  hideOfflineBanner,
   setStatus,
   setupStatusChrome,
   showFatal,
@@ -77,6 +78,8 @@ function wireServiceWorkerMessages(toolHooks) {
     if (!data || !data.type) return;
 
     if (data.type === "disk-activity") {
+      // A real network chunk fetch succeeded, so connectivity is back.
+      if (!data.idle && (data.bytes || 0) > 0) hideOfflineBanner();
       handleDiskActivity(data, {
         enabled: !!GL_FEATURES.diskIndicator,
         onNames: toolHooks.onNames,
@@ -116,6 +119,10 @@ function wireOfflineEvent() {
       } catch (e) { /* fall through */ }
     }
     showOfflineBanner();
+  });
+
+  window.addEventListener("online", () => {
+    hideOfflineBanner();
   });
 }
 
