@@ -83,9 +83,34 @@ export function hideOfflineBanner() {
   if (el) el.classList.remove("visible");
 }
 
+let updateDismissed = false;
+
+export function showUpdateBanner() {
+  if (updateDismissed) return;
+  const el = $("updateBanner");
+  if (el) el.classList.add("visible");
+}
+
 export function setupStatusChrome() {
   const reloadBtn = $("fatalReload");
   if (reloadBtn) reloadBtn.onclick = () => location.reload();
+
+  const updateReload = $("updateBannerReload");
+  if (updateReload) {
+    updateReload.onclick = () => {
+      try { sessionStorage.removeItem("gl_reloaded_for"); } catch (e) {}
+      location.reload();
+    };
+  }
+
+  const updateDismiss = $("updateBannerDismiss");
+  if (updateDismiss) {
+    updateDismiss.onclick = () => {
+      updateDismissed = true;
+      const el = $("updateBanner");
+      if (el) el.classList.remove("visible");
+    };
+  }
 
   const dismissBtn = $("offlineBannerDismiss");
   if (dismissBtn) {

@@ -12,8 +12,15 @@ import {
   setupStatusChrome,
   showFatal,
   showOfflineBanner,
+  showUpdateBanner,
 } from "./status.js";
-import { bootMachine, prepareChunkAccess, restartMachine } from "./boot.js";
+import {
+  bootMachine,
+  isBootStarted,
+  prepareChunkAccess,
+  restartMachine,
+  triggerUpgradeReload,
+} from "./boot.js";
 import { observeTerminal } from "./terminal.js";
 import { setupKeyBar } from "./keybar.js";
 import { setupPersistUI } from "./persist-ui.js";
@@ -92,6 +99,20 @@ function wireServiceWorkerMessages(toolHooks) {
     // "out of date" and without killing the VM (BUG-09).
     if (data.type === "chunk-offline" || data.type === "chunk-miss") {
       showOfflineBanner();
+      return;
+    }
+
+    // Newly activated Service Worker from a fresh deploy.
+    if (data.type === "sw-activated") {
+      const versionChanged = data.version && data.version !== GL_VERSION;
+      const buildChanged = data.buildId && GL_BUILD_ID && data.buildId !== GL_BUILD_ID;
+      if (versionChanged || buildChanged) {
+        if (!isBootStarted()) {
+          triggerUpgradeReload("sw-act-" + (data.stamp || data.version));
+        } else {
+          showUpdateBanner();
+        }
+      }
       return;
     }
 

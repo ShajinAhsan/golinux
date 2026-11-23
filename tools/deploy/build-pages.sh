@@ -148,6 +148,26 @@ if not m or not m.group(1):
 PY3
 echo "   stamped GL_BUILD_ID = $BUILD_ID"
 
+# Stamp GL_VERSION + GL_BUILD_ID directly inside the staged sw.js so Safari /
+# WebKit always sees a byte-level change on every deploy (even when only
+# packs-config.js, js/*.js, styles.css, or the Alpine image changed).
+python3 - "$OUT/packs-config.js" "$OUT/sw.js" "$BUILD_ID" <<'PY4'
+import re, sys
+cfg_path, sw_path, build_id = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg = open(cfg_path).read()
+m = re.search(r'^const GL_VERSION = "([^"]+)";', cfg, re.M)
+if not m:
+    sys.exit("ERROR: could not find GL_VERSION in staged packs-config.js")
+stamp = f"{m.group(1)}-{build_id}"
+sw = open(sw_path).read()
+new, n = re.subn(r'^const GL_SW_STAMP = "[^"]*";',
+                 f'const GL_SW_STAMP = "{stamp}";', sw, flags=re.M)
+if n != 1:
+    sys.exit(f"ERROR: failed to stamp GL_SW_STAMP in sw.js (matched {n} times)")
+open(sw_path, "w").write(new)
+print(f"   stamped sw.js GL_SW_STAMP = {stamp}")
+PY4
+
 # Final gate on the STAGED tree: --deploy requires a non-empty, matching build
 # id, so a flat unversioned deploy cannot leave this script.
 if [ -z "$OVERRIDE_BUILD_ID" ]; then

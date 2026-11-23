@@ -330,6 +330,27 @@ a.nav-link:hover { color: var(--fg); background: rgba(255, 255, 255, 0.04); }
   color: #fef3c7;
 }
 
+#updateBanner {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(52, 211, 153, 0.10);
+  border-bottom: 1px solid rgba(52, 211, 153, 0.28);
+  color: #d1fae5;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+#updateBanner.visible { display: flex; }
+#updateBanner .grow { flex: 1; min-width: 0; }
+#updateBanner button {
+  padding: 4px 10px;
+  font-size: 11.5px;
+  background: rgba(52, 211, 153, 0.16);
+  border-color: rgba(52, 211, 153, 0.35);
+  color: #ecfdf5;
+}
+
 /* ---------- Modals (/mnt/host Download & Packs) ---------- */
 #packs, #filesModal {
   position: fixed;

@@ -13,6 +13,7 @@ import {
   setStatus,
   showFatal,
   showProgress,
+  showUpdateBanner,
 } from "./status.js";
 import { currentTerminal, fitSoon } from "./terminal.js";
 import { attachKeyboardInterceptor } from "./keybar.js";
@@ -56,6 +57,80 @@ function waitForWorkerControl(timeoutMs) {
   });
 }
 
+let bootStarted = false;
+let upgradeReloading = false;
+
+export function isBootStarted() {
+  return bootStarted;
+}
+
+/**
+ * Perform at most one automatic reload per upgrade key in this tab session so
+ * returning normal tabs cleanly transition onto a newly deployed Service Worker
+ * without ever risking a reload loop.
+ */
+export function triggerUpgradeReload(reasonKey) {
+  if (upgradeReloading) return true;
+  const key = String(reasonKey || "upgrade");
+  try {
+    if (sessionStorage.getItem("gl_reloaded_for") === key) {
+      return false;
+    }
+    sessionStorage.setItem("gl_reloaded_for", key);
+  } catch (e) {
+    // sessionStorage unavailable; fall back to banner instead of risking a loop.
+    showUpdateBanner();
+    return false;
+  }
+  upgradeReloading = true;
+  setLoading("Updating GoLinux", "Loading the latest version…");
+  setStatus("updating…");
+  location.reload();
+  return true;
+}
+
+function waitForWorkerActivation(reg, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (!settled) { settled = true; resolve(v); }
+    };
+    const onCtrl = () => done(true);
+    navigator.serviceWorker.addEventListener("controllerchange", onCtrl, { once: true });
+    const watch = (w) => {
+      if (!w) return;
+      if (w.state === "activated") { done(true); return; }
+      w.addEventListener("statechange", () => {
+        if (w.state === "activated" || w.state === "redundant") done(w.state === "activated");
+      });
+    };
+    watch(reg.installing || reg.waiting);
+    reg.addEventListener("updatefound", () => watch(reg.installing), { once: true });
+    setTimeout(() => {
+      navigator.serviceWorker.removeEventListener("controllerchange", onCtrl);
+      done(false);
+    }, timeoutMs);
+  });
+}
+
+async function fetchLiveBuildId(timeoutMs) {
+  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const t = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch("images/build-id.json", {
+      cache: "no-store",
+      signal: ctrl ? ctrl.signal : undefined,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data && typeof data.buildId === "string" && data.buildId) ? data.buildId : null;
+  } catch (e) {
+    return null;
+  } finally {
+    if (t) clearTimeout(t);
+  }
+}
+
 export async function prepareChunkAccess() {
   const remoteChunks = !!GL_ASSET_BASE;
 
@@ -72,15 +147,56 @@ export async function prepareChunkAccess() {
     return true;
   }
 
-  navigator.serviceWorker.addEventListener("controllerchange", pushAssetBase);
+  const hadController = !!navigator.serviceWorker.controller;
 
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    pushAssetBase();
+    if (!hadController) return;
+    if (!bootStarted) {
+      triggerUpgradeReload("sw-ctrl-" + GL_VERSION + "-" + (GL_BUILD_ID || "dev"));
+    } else {
+      showUpdateBanner();
+    }
+  });
+
+  let reg = null;
   try {
-    await navigator.serviceWorker.register("sw.js");
+    // updateViaCache:"none" forces Safari/Chrome/Firefox to bypass HTTP cache
+    // when checking sw.js and importScripts(packs-config.js) on every load.
+    reg = await navigator.serviceWorker.register("sw.js", { updateViaCache: "none" });
   } catch (e) {
     console.warn("service worker registration failed:", e);
   }
 
+  // If this normal tab already had an older SW controlling it, proactively
+  // check for a newer deploy BEFORE booting the VM so we never boot split-brain
+  // (old shell + old snapshot talking to a newly activated SW).
+  if (hadController && reg && navigator.onLine !== false) {
+    try {
+      await Promise.race([
+        reg.update().catch(() => {}),
+        new Promise((r) => setTimeout(r, 2500)),
+      ]);
+      if (upgradeReloading) return false;
+      if (reg.installing || reg.waiting) {
+        setLoading("Updating GoLinux", "Installing the latest version…");
+        await waitForWorkerActivation(reg, 4500);
+        if (upgradeReloading) return false;
+      }
+      // Safety net: if Safari still served a stale packs-config.js from cache
+      // while the server has a newer build-id.json, reload cleanly once.
+      if (GL_BUILD_ID) {
+        const liveId = await fetchLiveBuildId(2000);
+        if (liveId && liveId !== GL_BUILD_ID) {
+          try { await reg.update(); } catch (e) {}
+          if (triggerUpgradeReload("build-" + liveId)) return false;
+        }
+      }
+    } catch (e) { /* offline or update check timed out; proceed with cached SW */ }
+  }
+
   const controlled = await waitForWorkerControl(6000);
+  if (upgradeReloading) return false;
   if (controlled) {
     pushAssetBase();
     await initChunkFallback();
@@ -175,6 +291,7 @@ let ownershipClaimed = false;
 let restarting = false;
 
 export async function bootMachine() {
+  bootStarted = true;
   const bootStart = performance.now();
 
   if (navigator.storage && navigator.storage.persist) {

@@ -325,6 +325,9 @@ async function launchChrome(profileDir, port) {
     const appDir = path.join(tmp, "app");
     fs.cpSync(PAGES_SRC, appDir, { recursive: true });
     check(fs.existsSync(path.join(appDir, "chunks-precache.json")), "staged app includes chunks-precache.json");
+    const stagedSwSrc = fs.readFileSync(path.join(appDir, "sw.js"), "utf8");
+    check(new RegExp(`^const GL_SW_STAMP = "v\\d+-${buildId}";`, "m").test(stagedSwSrc),
+      "staged sw.js is stamped with GL_VERSION + buildId (forces Safari SW update)");
 
     const assetLog = [];
     const assetOffline = { value: false };
@@ -812,17 +815,69 @@ async function launchChrome(profileDir, port) {
     await setUserTyping(cdp, false);
     check(/RESTART_ALIVE/.test(afterRestart), "Restart button boots working shell (never hangs SeaBIOS, BUG-22)");
 
-    /* --- 7. Safe Reset button (BUG-15) --- */
+    /* --- 7. Safe Reset button (BUG-15 + deep cache/SW refresh) --- */
     console.log("\n== safe Reset button ==");
     await cdp.send("Runtime.evaluate", {
-      expression: `window.confirm = () => true; document.getElementById("resetBtn").click();`,
+      expression: `(async () => {
+        const c = await caches.open("golinux-shell-v0-stale");
+        await c.put("/stale-probe", new Response("old"));
+        window.confirm = () => true;
+        document.getElementById("resetBtn").click();
+      })()`,
+      awaitPromise: true,
     });
-    await sleep(2500);
+    await sleep(3000);
     await waitScreen(cdp, /root@golinux:~#/, 60000, "prompt after Reset");
+    const cachesAfterReset = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `caches.keys().then((k) => JSON.stringify(k))`,
+      awaitPromise: true, returnByValue: true,
+    })).result.value);
+    check(!cachesAfterReset.includes("golinux-shell-v0-stale"),
+      `Reset wiped stale Cache Storage entries (caches=${JSON.stringify(cachesAfterReset)})`);
     await setUserTyping(cdp, true);
     const afterReset = await runCmd(cdp, "test -f /root/marker.txt && echo STILL_THERE || echo CLEAN_RESET", /STILL_THERE|CLEAN_RESET/, 20000, "after Reset");
     await setUserTyping(cdp, false);
     check(/CLEAN_RESET/.test(afterReset), "Reset wiped saved session cleanly without pagehide re-save race (BUG-15)");
+
+    /* --- 7b. Normal-tab seamless upgrade (no incognito, no manual cache clear) --- */
+    console.log("\n== normal-tab upgrade (SW stamp + auto-reload) ==");
+    const verBeforeUpgrade = (await cdp.send("Runtime.evaluate", {
+      expression: `GL_VERSION`, returnByValue: true,
+    })).result.value;
+    const nextVer = verBeforeUpgrade + "next";
+    fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, "utf8").replace(
+      /^const GL_VERSION = "[^"]+";/m,
+      `const GL_VERSION = "${nextVer}";`
+    ));
+    const swPath = path.join(appDir, "sw.js");
+    fs.writeFileSync(swPath, fs.readFileSync(swPath, "utf8").replace(
+      /^const GL_SW_STAMP = "[^"]+";/m,
+      `const GL_SW_STAMP = "${nextVer}-${buildId}";`
+    ));
+    // Reload in the SAME normal tab (ignoreCache: false) — must auto-upgrade cleanly!
+    await cdp.send("Page.reload", { ignoreCache: false });
+    // Wait for auto-reload + fresh boot on nextVer
+    for (let i = 0; i < 60; i++) {
+      const v = (await cdp.send("Runtime.evaluate", {
+        expression: `typeof GL_VERSION === "string" ? GL_VERSION : ""`,
+        returnByValue: true,
+      })).result.value;
+      if (v === nextVer) break;
+      await sleep(300);
+    }
+    await waitScreen(cdp, /root@golinux:~#/, 60000, "prompt after normal-tab auto-upgrade");
+    const upgradeCheck = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(async () => JSON.stringify({
+        version: GL_VERSION,
+        caches: await caches.keys(),
+      }))()`,
+      awaitPromise: true, returnByValue: true,
+    })).result.value);
+    check(upgradeCheck.version === nextVer,
+      `normal tab auto-upgraded cleanly (${verBeforeUpgrade} -> ${upgradeCheck.version}) with zero manual cache clear`);
+    check(upgradeCheck.caches.includes("golinux-shell-" + nextVer) &&
+          !upgradeCheck.caches.includes("golinux-shell-" + verBeforeUpgrade),
+      `old SW caches purged on upgrade (active=${JSON.stringify(upgradeCheck.caches)})`);
 
     /* --- 8. Fresh-vs-Upgrade: mismatched buildId rejected online AND offline (BUG-05) --- */
     console.log("\n== upgrade safety (online & offline) ==");

@@ -18,6 +18,11 @@
  *   - HTML navigations use network-first with cache fallback so deploys ship immediately.
  */
 
+// Stamped with "<GL_VERSION>-<GL_BUILD_ID>" by build-pages.sh on every deploy
+// so Safari/WebKit always detects a byte-level sw.js update even when only
+// packs-config.js, js/*.js, styles.css, or the Linux image changed.
+const GL_SW_STAMP = "dev";
+
 importScripts("packs-config.js");
 
 const SHELL_FILES = GL_SHELL_FILES;
@@ -71,6 +76,12 @@ self.addEventListener("activate", (event) => {
     const names = await caches.keys();
     await Promise.all(names.filter((n) => !keep.has(n)).map((n) => caches.delete(n)));
     await self.clients.claim();
+    broadcast({
+      type: "sw-activated",
+      version: GL_VERSION,
+      buildId: GL_BUILD_ID,
+      stamp: GL_SW_STAMP,
+    });
   })());
 });
 
@@ -599,14 +610,20 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Snapshot: cached on first load in GL_DATA_CACHE (versioned by GL_VERSION).
-  if (url.pathname.endsWith(GL_SNAPSHOT_URL)) {
+  // Snapshot / kernel / initrd: cached on first load in GL_DATA_CACHE (versioned
+  // by GL_VERSION). Always fetch with cache:"reload" on miss so the browser's
+  // HTTP disk cache can never poison a new GL_DATA_CACHE with an old image.
+  if (url.pathname.endsWith(GL_SNAPSHOT_URL) ||
+      url.pathname.endsWith("/images/debian-bzImage") ||
+      url.pathname.endsWith("/images/debian-initrd")) {
     event.respondWith((async () => {
       const cache = await caches.open(GL_DATA_CACHE);
       const hit = await cache.match(request, { ignoreSearch: true });
       if (hit) return hit;
-      const response = await fetch(request);
-      if (response.ok) cache.put(request, response.clone()).catch(() => {});
+      const response = await fetch(new Request(request.url, { method: request.method, cache: "reload" }));
+      if (response.ok && request.method === "GET") {
+        cache.put(request, response.clone()).catch(() => {});
+      }
       return response;
     })());
     return;
