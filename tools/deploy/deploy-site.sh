@@ -108,8 +108,8 @@ fi
 #    copy for a moment.
 # ---------------------------------------------------------------------------
 fetch() {
-  # fetch <url> <outfile> -> prints nothing; body goes to <outfile>
-  curl -sS -m 20 -o "$2" "$1"
+  # fetch <url> <outfile> -> follows redirects; body goes to <outfile>
+  curl -sSL -m 20 -o "$2" "$1"
 }
 
 retry() {
@@ -146,10 +146,16 @@ check_sw_sha() {
 
 check_index_sha() {
   local tmp; tmp="$(mktemp)"
-  fetch "$SITE_URL/index.html?cb=$(cb)" "$tmp" || { rm -f "$tmp"; return 1; }
+  # Fetch "/" (Cloudflare Workers Static Assets redirects /index.html -> / with 308).
+  local code
+  code="$(curl -sSL -m 20 -o "$tmp" -w '%{http_code}' "$SITE_URL/?cb=$(cb)")" || { rm -f "$tmp"; return 1; }
   local live; live="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
+  local bytes; bytes="$(wc -c < "$tmp" | tr -d ' ')"
   rm -f "$tmp"
-  [ "$live" = "$INDEX_SHA" ]
+  if [ "$code" != "200" ] || [ "$live" != "$INDEX_SHA" ]; then
+    echo "  got HTTP $code ($bytes bytes, sha256 $live; expected $INDEX_SHA)" >&2
+    return 1
+  fi
 }
 
 check_asset_origin_and_build_id() {
