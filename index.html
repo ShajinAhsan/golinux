@@ -21,8 +21,8 @@
     <div id="barActions">
       <button id="restart" data-feature="restartButton">Restart</button>
       <button id="openPacks" class="wide-only" data-feature="packs">Save for offline use</button>
-      <button id="uploadBtn" class="wide-only" data-feature="upload" title="Send a file into /mnt/host (max 50 MB)">Upload</button>
-      <button id="downloadBtn" class="wide-only" data-feature="download" title="Download /root archive">Download /root</button>
+      <button id="uploadBtn" class="wide-only" data-feature="upload" title="Send files into /mnt/host (max 50 MB)">Upload</button>
+      <button id="downloadBtn" class="wide-only" data-feature="download" title="Download files from /mnt/host">Download</button>
       <button id="resetBtn" class="wide-only" title="Discard saved session and start fresh">Reset</button>
       <a id="aboutLink" class="wide-only nav-link" href="about.html">About</a>
       <button id="barMenuBtn" aria-haspopup="true" aria-expanded="false" aria-label="More actions">⋮</button>
@@ -31,7 +31,7 @@
     <div id="barMenu" role="menu" hidden>
       <button id="mPacks" role="menuitem" data-feature="packs">Save for offline use</button>
       <button id="mUpload" role="menuitem" data-feature="upload">Upload</button>
-      <button id="mDownload" role="menuitem" data-feature="download">Download /root</button>
+      <button id="mDownload" role="menuitem" data-feature="download">Download</button>
       <button id="mReset" role="menuitem">Reset</button>
       <a id="mAbout" role="menuitem" href="about.html">About</a>
     </div>
@@ -114,6 +114,24 @@
       <div id="packsFooter">
         <span id="packQuota" style="font-size:12px;color:#77828d"></span>
         <button id="closePacks">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="filesModal" role="dialog" aria-modal="true" aria-labelledby="filesTitle" data-feature="download">
+    <div id="filesBox">
+      <h2 id="filesTitle">Download files from /mnt/host</h2>
+      <p class="hint">
+        Copy files into <code>/mnt/host</code> from the terminal first — e.g.
+        <code>cp main.c /mnt/host/</code> or
+        <code>tar czf /mnt/host/root.tar.gz -C / root</code>.
+        Files in <code>/mnt/host</code> are temporary and are not saved across reloads.
+      </p>
+      <div id="filesList"></div>
+      <div id="filesStatus"></div>
+      <div id="filesFooter">
+        <button id="refreshFiles" type="button">Refresh</button>
+        <button id="closeFiles" type="button">Close</button>
       </div>
     </div>
   </div>

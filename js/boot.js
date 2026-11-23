@@ -22,6 +22,7 @@ const FRESH_MOTD = [
   "  GoLinux — Debian 12 (bookworm) i386, running in your browser.",
   "  Installed: bash, coreutils, util-linux, git, gcc/g++, make, man, nano, curl.",
   "  Networking is OFF. Files in /root are saved locally in this browser.",
+  "  Transfer files via Upload/Download (/mnt/host is temporary; cp to /root to keep).",
   "  Use Reset to start over. First use of a tool loads its blocks on demand.",
   "",
 ].join("\r\n");

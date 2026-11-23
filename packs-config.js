@@ -11,7 +11,7 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v16";
+const GL_VERSION = "v17";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
  * (e.g. virtio_console, memory_size) changes so incompatible saved OPFS states
@@ -25,11 +25,11 @@ const GL_MEMORY_SIZE = 256 * 1024 * 1024;
  * and invariants pass (see docs/stabilization/SCOPE.md). */
 const GL_FEATURES = Object.freeze({
   packs: false,
-  diskIndicator: true,   // compact inline indicator in #bar (zero terminal layout shift)
+  diskIndicator: true,   // compact floating toast (zero terminal layout shift)
   toolProgress: false,
   prefetch: false,
-  upload: false,
-  download: false,
+  upload: true,          // 9p create_file() into /mnt/host (zero stdin injection)
+  download: true,        // /mnt/host file browser using 9p read_file() (zero stdin injection)
   restartButton: true,   // safe snapshot restart (re-instantiates V86; never SeaBIOS reboot)
 });
 

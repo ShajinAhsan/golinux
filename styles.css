@@ -271,6 +271,81 @@ a.nav-link:hover { color: var(--fg-hi); }
 #saveDataNote { font-size: 12px; color: #d0a24a; margin: 0 0 10px; display: none; }
 #saveDataNote.visible { display: block; }
 
+/* ---------- download files modal (/mnt/host) ---------- */
+#filesModal {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 7, 9, 0.72);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 30;
+}
+#filesModal.visible { display: flex; }
+#filesBox {
+  background: var(--surface);
+  border: 1px solid #262c33;
+  border-radius: 8px;
+  width: min(540px, calc(100vw - 28px));
+  max-height: calc(100dvh - 56px);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 18px 14px;
+}
+#filesBox h2 { margin: 0 0 6px; font-size: 14px; color: var(--fg-hi); }
+#filesBox p.hint { margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+#filesBox code {
+  background: #171b20;
+  color: #dfe5ea;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+#filesList {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 60px;
+  max-height: 50dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.host-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #222830;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #0d1014;
+}
+.host-file .hf-info { flex: 1; min-width: 0; }
+.host-file .hf-name {
+  color: #dfe5ea;
+  word-break: break-all;
+  font-size: 12.5px;
+}
+.host-file .hf-size { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.host-file button { min-height: 34px; flex: 0 0 auto; }
+#filesEmpty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 14px 10px;
+  border: 1px dashed #222830;
+  border-radius: 6px;
+  text-align: center;
+  line-height: 1.5;
+}
+#filesStatus { margin-top: 10px; font-size: 12px; color: #8b95a1; min-height: 1.2em; }
+#filesStatus.ok { color: var(--accent); }
+#filesStatus.error { color: var(--err); }
+#filesFooter {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 12px;
+  gap: 8px;
+}
+
 /* ---------- loading & fatal overlays ---------- */
 #loading {
   position: fixed;

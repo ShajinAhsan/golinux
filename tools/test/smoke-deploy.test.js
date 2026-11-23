@@ -461,7 +461,70 @@ async function launchChrome(profileDir, port) {
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await sleep(400);
 
-    /* --- 5. Persistence across reload + INV-1 spy on restore --- */
+    /* --- 5. Upload & Option A Download (/mnt/host) with ZERO stdin injection --- */
+    console.log("\n== upload & download (/mnt/host, zero stdin) ==");
+    await sleep(150);
+    await cdp.send("Runtime.evaluate", {
+      expression: `window.__stdinSpy.injectedBytes = []; window.__stdinSpy.serial0SendCalls = 0;`,
+    });
+    await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const dt = new DataTransfer();
+        // Deliberately include shell metacharacters to prove zero shell injection (BUG-03).
+        dt.items.add(new File(["UPLOAD_PAYLOAD_OK\\n"], 'safe"; $(touch pwned); #.txt', { type: "text/plain" }));
+        const input = document.getElementById("uploadInput");
+        input.files = dt.files;
+        input.dispatchEvent(new Event("change"));
+      })()`,
+    });
+    await sleep(600);
+    const spyAfterUpload = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `JSON.stringify(window.__stdinSpy)`, returnByValue: true,
+    })).result.value);
+    check(spyAfterUpload.serial0SendCalls === 0 && spyAfterUpload.injectedBytes.length === 0,
+      "INV-1: Upload sends zero bytes to guest stdin (zero shell injection, BUG-03)");
+
+    await setUserTyping(cdp, true);
+    const upCheck = await runCmd(
+      cdp,
+      "test ! -f /root/pwned && cat /mnt/host/safe* && echo FROM_GUEST_9P > /mnt/host/export.txt && echo EXPORT_WRITTEN",
+      /UPLOAD_PAYLOAD_OK[\s\S]*EXPORT_WRITTEN/,
+      20000,
+      "verify upload & create guest export"
+    );
+    await sleep(150);
+    await setUserTyping(cdp, false);
+    check(/UPLOAD_PAYLOAD_OK/.test(upCheck), "uploaded file readable in guest /mnt/host without shell injection");
+
+    // Open Download modal (Option A): must list export.txt and read it via 9p with zero stdin!
+    await cdp.send("Runtime.evaluate", {
+      expression: `window.__stdinSpy.injectedBytes = []; window.__stdinSpy.serial0SendCalls = 0; document.getElementById("downloadBtn").click();`,
+    });
+    await sleep(200);
+    const dlModalState = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const visible = document.getElementById("filesModal").classList.contains("visible");
+        const items = [...document.querySelectorAll("#filesList .hf-name")].map(e => e.textContent);
+        const btn = document.querySelector('#filesList button[data-download-path="export.txt"]');
+        if (btn) btn.click();
+        await new Promise(r => setTimeout(r, 300));
+        const status = document.getElementById("filesStatus").textContent;
+        document.getElementById("closeFiles").click();
+        return JSON.stringify({ visible, items, status });
+      })()`,
+      awaitPromise: true, returnByValue: true,
+    })).result.value);
+    check(dlModalState.visible === true && dlModalState.items.includes("export.txt"),
+      "Download modal lists guest file from /mnt/host (" + dlModalState.items.join(", ") + ")");
+    check(/Downloaded export\.txt/.test(dlModalState.status),
+      "Option A Download succeeded via 9p read_file (" + dlModalState.status + ")");
+    const spyAfterDownload = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `JSON.stringify(window.__stdinSpy)`, returnByValue: true,
+    })).result.value);
+    check(spyAfterDownload.serial0SendCalls === 0 && spyAfterDownload.injectedBytes.length === 0,
+      "INV-1: Option A Download sends zero bytes to guest stdin (BUG-04)");
+
+    /* --- 6. Persistence across reload + INV-1 spy on restore --- */
     console.log("\n== persistence & restore ==");
     await setUserTyping(cdp, true);
     await runCmd(cdp, "echo SURVIVED_TEST > /root/marker.txt && cat /root/marker.txt", /SURVIVED_TEST/, 20000, "write marker");

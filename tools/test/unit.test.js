@@ -216,6 +216,17 @@ async function testPureESModules() {
   check(transfer.sanitizeFilename("../../etc/passwd") === "passwd", "transfer: strips path traversal");
   check(transfer.sanitizeFilename("a\nb\x00.txt") === "a_b_.txt", "transfer: strips control characters");
   check(transfer.sanitizeFilename("..") === "upload", "transfer: rejects bare '..'");
+  const fakeFs = {
+    inodes: [
+      { mode: 0x4000, direntries: new Map([[".", 0], ["..", 0], ["z.txt", 1], ["sub", 2]]) },
+      { mode: 0x8000, size: 12 },
+      { mode: 0x4000, direntries: new Map([[".", 2], ["..", 0], ["a.bin", 3]]) },
+      { mode: 0x8000, size: 4096 },
+    ],
+  };
+  const listed = transfer.listHostFiles(fakeFs);
+  check(listed.length === 2 && listed[0].path === "sub/a.bin" && listed[0].size === 4096 && listed[1].path === "z.txt" && listed[1].size === 12,
+    "transfer: listHostFiles walks /mnt/host recursively, skips ./.., returns sorted files with sizes");
 
   const tp = await import(pathToFileURL(path.join(ROOT, "js/tool-progress.js")).href);
   const sets = {
