@@ -104,7 +104,7 @@ export function desiredGrid() {
   return computeGrid(el.clientWidth - padX, el.clientHeight - padY, cell.w, cell.h);
 }
 
-/** Apply vibrant theme & responsive font size for phone vs desktop. */
+/** Apply vibrant theme, responsive font size, and alternate-buffer resize flush. */
 function syncTerminalStyle(term) {
   if (!term || !term.options) return;
   if (themedTerm !== term) {
@@ -114,6 +114,28 @@ function syncTerminalStyle(term) {
     term.options.lineHeight = 1.26;
     term.options.cursorBlink = true;
     term.options.cursorStyle = "bar";
+
+    // When a full-screen TUI (nano, vi, less, man, htop, tmux) enters the
+    // alternate screen buffer, flush any deferred height-only resize once
+    // the app finishes initscr()/signal_init() so it catches SIGWINCH and
+    // redraws its bottom bar to the exact keyboard-adjusted row count.
+    if (term.buffer && typeof term.buffer.onBufferChange === "function") {
+      term.buffer.onBufferChange((buf) => {
+        clearTimeout(altFlushTimer);
+        altFlushTimer = null;
+        if (buf && buf.type === "alternate" && appliedCols > 0 && appliedRows > 0 &&
+            (appliedCols !== lastSentCols || appliedRows !== lastSentRows)) {
+          altFlushTimer = setTimeout(() => {
+            altFlushTimer = null;
+            if (!isAlternateBuffer(currentTerminal())) return;
+            if (appliedCols === lastSentCols && appliedRows === lastSentRows) return;
+            clearTimeout(resizeDebounceTimer);
+            resizeDebounceTimer = null;
+            sendVirtioResizeNow(getEmulator(), appliedCols, appliedRows);
+          }, 150);
+        }
+      });
+    }
   }
   const want = window.innerWidth <= 480 ? 12 : 14;
   if (term.options.fontSize !== want) {
@@ -121,8 +143,13 @@ function syncTerminalStyle(term) {
   }
 }
 
+function isAlternateBuffer(term) {
+  return !!(term && term.buffer && term.buffer.active && term.buffer.active.type === "alternate");
+}
+
 let resizeRetryTimer = null;
 let resizeDebounceTimer = null;
+let altFlushTimer = null;
 let lastSentCols = 0;
 let lastSentRows = 0;
 const VIRTIO_RESIZE_DEBOUNCE_MS = 220;
@@ -144,9 +171,16 @@ function sendVirtioResizeNow(emu, cols, rows) {
 }
 
 /**
- * Debounce out-of-band SIGWINCH so mobile keyboard open/close animations
- * (which fire 10+ visualViewport frames) send ONE clean resize after settling
- * instead of flickering the bash prompt on every animation frame.
+ * Send out-of-band SIGWINCH without flickering the shell prompt on mobile.
+ *
+ * - On height-only changes (cols unchanged, e.g. mobile soft keyboard open,
+ *   close, or size change) while in the normal shell buffer, xterm.js already
+ *   handles viewport height locally; sending SIGWINCH would force Bash/Readline
+ *   to erase (\r\e[K) and slowly retype root@golinux:~# byte-by-byte. So we
+ *   defer the guest resize and flush it immediately if a full-screen TUI
+ *   enters the alternate buffer.
+ * - Width changes (cols !== lastSentCols) and resizes while inside a full-screen
+ *   TUI (alternate buffer) are debounced so animations send one clean SIGWINCH.
  */
 function scheduleVirtioResize(emu, cols, rows, immediate) {
   clearTimeout(resizeDebounceTimer);
@@ -155,9 +189,13 @@ function scheduleVirtioResize(emu, cols, rows, immediate) {
     sendVirtioResizeNow(emu, cols, rows);
     return;
   }
+  if (lastSentCols > 0 && cols === lastSentCols && !isAlternateBuffer(currentTerminal())) {
+    return;
+  }
   resizeDebounceTimer = setTimeout(() => {
     resizeDebounceTimer = null;
     if (appliedCols === lastSentCols && appliedRows === lastSentRows) return;
+    if (lastSentCols > 0 && appliedCols === lastSentCols && !isAlternateBuffer(currentTerminal())) return;
     sendVirtioResizeNow(getEmulator(), appliedCols, appliedRows);
   }, VIRTIO_RESIZE_DEBOUNCE_MS);
 }
@@ -203,6 +241,8 @@ export function scheduleFit() {
 export function fitSoon({ nudgeRedraw = false } = {}) {
   clearTimeout(resizeDebounceTimer);
   resizeDebounceTimer = null;
+  clearTimeout(altFlushTimer);
+  altFlushTimer = null;
   appliedCols = 0;
   appliedRows = 0;
   lastSentCols = 0;

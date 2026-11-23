@@ -630,18 +630,28 @@ async function launchChrome(profileDir, port) {
     check(!!szMatch && Number(szMatch[1]) === gridNow.rows && Number(szMatch[2]) === gridNow.cols,
       `guest tty matches xterm grid via virtio-console0-resize (${szMatch ? szMatch[1] + "x" + szMatch[2] : "?"} vs ${gridNow.rows}x${gridNow.cols})`);
 
-    // Mobile keyboard toggle flicker regression: 5 rapid height-only viewport frames must coalesce into <= 1 SIGWINCH
+    // Mobile keyboard toggle/size-change flicker regression:
+    // 1. Height-only viewport changes at the normal bash prompt must send ZERO SIGWINCH
+    //    and produce ZERO guest prompt redraw bytes (eliminating root@golinux:~# flicker).
+    // 2. Opening nano while the keyboard is shrunk must immediately flush the deferred
+    //    height via onBufferChange so nano's bottom bar fits inside the shrunk screen.
+    // 3. Resizing keyboard while inside nano (alternate buffer) must send 1 debounced resize.
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-    await sleep(400);
+    await sleep(450);
     await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const bus = window.emulator.bus;
         window.__origBusSend = bus.send.bind(bus);
         window.__virtioResizeCount = 0;
+        window.__guestOutBytes = 0;
         bus.send = function(name, value) {
           if (name === "virtio-console0-resize") window.__virtioResizeCount++;
           return window.__origBusSend(name, value);
         };
+        window.__guestOutListener = (bytes) => {
+          window.__guestOutBytes += bytes ? bytes.length : 0;
+        };
+        window.emulator.add_listener("virtio-console0-output-bytes", window.__guestOutListener);
       })()`,
     });
     for (const h of [760, 680, 600, 540, 480]) {
@@ -649,17 +659,50 @@ async function launchChrome(profileDir, port) {
       await sleep(30);
     }
     await sleep(400);
-    const kbdResizeCount = (await cdp.send("Runtime.evaluate", {
+    const kbdPromptStats = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `JSON.stringify({ resizes: window.__virtioResizeCount, bytes: window.__guestOutBytes })`,
+      returnByValue: true,
+    })).result.value);
+    check(kbdPromptStats.resizes === 0 && kbdPromptStats.bytes === 0,
+      `mobile keyboard height change at bash prompt sends 0 SIGWINCH & 0 prompt redraw bytes (resizes=${kbdPromptStats.resizes}, bytes=${kbdPromptStats.bytes})`);
+
+    // Now launch nano while still at shrunk mobile keyboard height (390x480)
+    await setUserTyping(cdp, true);
+    await focusTerm(cdp);
+    await typeText(cdp, "nano /root/t.c");
+    await pressEnter(cdp);
+    await waitScreen(cdp, /GNU nano[\s\S]*Exit/, 15000, "nano fits shrunk mobile keyboard height");
+    await sleep(250);
+    const nanoAltResizes = (await cdp.send("Runtime.evaluate", {
+      expression: `window.__virtioResizeCount`,
+      returnByValue: true,
+    })).result.value;
+    check(nanoAltResizes >= 1,
+      `entering nano flushed deferred mobile keyboard height via onBufferChange (resizes=${nanoAltResizes})`);
+
+    // Now close keyboard while inside nano (alternate buffer): nano MUST receive 1 resize
+    await cdp.send("Runtime.evaluate", { expression: `window.__virtioResizeCount = 0;` });
+    for (const h of [600, 720, 844]) {
+      await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: h, deviceScaleFactor: 1, mobile: true });
+      await sleep(30);
+    }
+    await sleep(450);
+    const nanoCloseResizes = (await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const n = window.__virtioResizeCount;
         window.emulator.bus.send = window.__origBusSend;
+        window.emulator.remove_listener("virtio-console0-output-bytes", window.__guestOutListener);
         delete window.__origBusSend;
+        delete window.__guestOutListener;
         return n;
       })()`,
       returnByValue: true,
     })).result.value;
-    check(kbdResizeCount === 1,
-      `mobile keyboard 5-frame height animation coalesced into 1 virtio resize (got ${kbdResizeCount})`);
+    check(nanoCloseResizes === 1,
+      `keyboard close inside nano (alternate buffer) coalesced into 1 resize (got ${nanoCloseResizes})`);
+    await pressCtrl(cdp, "x");
+    await waitScreen(cdp, /root@golinux:~#/, 15000, "nano exits after mobile keyboard test");
+    await setUserTyping(cdp, false);
 
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await sleep(400);
