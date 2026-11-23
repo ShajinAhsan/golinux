@@ -480,8 +480,8 @@ async function launchChrome(profileDir, port) {
       "saved state stamped with buildId and schema=2");
 
     await cdp.send("Page.reload", { ignoreCache: false });
-    await waitScreen(cdp, /\[session restored\]/, 60000, "restored banner");
-    await sleep(800);
+    await waitScreen(cdp, /\[session restored\][\s\S]*root@golinux:~#/, 60000, "restored banner + redrawn prompt");
+    await sleep(500);
     const spyRestore = JSON.parse((await cdp.send("Runtime.evaluate", {
       expression: `JSON.stringify(window.__stdinSpy)`, returnByValue: true,
     })).result.value);
@@ -497,7 +497,7 @@ async function launchChrome(profileDir, port) {
     console.log("\n== safe Restart button ==");
     await cdp.send("Runtime.evaluate", { expression: `document.getElementById("restart").click()` });
     await sleep(1500);
-    await waitScreen(cdp, /session restored|root@golinux:~#/, 30000, "prompt after Restart");
+    await waitScreen(cdp, /\[session restored\][\s\S]*root@golinux:~#/, 30000, "prompt after Restart");
     await setUserTyping(cdp, true);
     const afterRestart = await runCmd(cdp, "echo RESTART_ALIVE", /RESTART_ALIVE[\s\S]*RESTART_ALIVE/, 20000, "after Restart");
     await setUserTyping(cdp, false);

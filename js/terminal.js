@@ -141,14 +141,27 @@ export function scheduleFit() {
   });
 }
 
-export function fitSoon() {
+export function fitSoon({ nudgeRedraw = false } = {}) {
   appliedCols = 0;
   appliedRows = 0;
   requestAnimationFrame(() => {
     fitTerminal(true);
+    if (nudgeRedraw) {
+      // Out-of-band SIGWINCH nudge (zero stdin bytes): if the restored VM
+      // already has the exact same cols x rows, Linux skips SIGWINCH. Sending
+      // rows-1 then rows makes bash redraw its real prompt (including cwd)
+      // and makes nano/vim/less redraw cleanly.
+      const emu = getEmulator();
+      const c = appliedCols;
+      const r = appliedRows;
+      if (emu && emu.virtio_console_adapter && c > 0 && r > MIN_ROWS) {
+        setTimeout(() => sendVirtioResize(emu, c, r - 1), 80);
+        setTimeout(() => sendVirtioResize(emu, appliedCols || c, appliedRows || r), 160);
+      }
+    }
     requestAnimationFrame(() => fitTerminal(false));
   });
-  setTimeout(() => fitTerminal(false), 300);
+  setTimeout(() => fitTerminal(false), 350);
   setTimeout(() => fitTerminal(false), 900);
 }
 

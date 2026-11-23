@@ -285,9 +285,6 @@ export async function bootMachine() {
     // Attach autosave lifecycle (only active if this tab owns persistence lock).
     window.GoPersist.attach(emu);
 
-    // Resize xterm.js and send out-of-band virtio-console0-resize (zero stdin).
-    fitSoon();
-
     // Display local banner ONLY via xterm.write (zero bytes sent to guest!).
     const term = currentTerminal();
     if (term && initialState) {
@@ -297,6 +294,10 @@ export async function bootMachine() {
         term.write(FRESH_MOTD + "\r\nroot@golinux:~# ");
       }
     }
+
+    // Resize xterm.js and send out-of-band virtio-console0-resize (zero stdin).
+    // On user-state restore, nudge SIGWINCH so bash/nano redraws its real prompt.
+    fitSoon({ nudgeRedraw: !!userState });
   });
 
   emu.add_listener("emulator-started", () => setStatus("running"));
