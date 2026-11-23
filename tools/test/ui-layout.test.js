@@ -315,6 +315,91 @@ async function geometry(cdp) {
     })).result.value);
     check(busPlain.some((a) => a.join(",") === "111"), "following native key is unmodified 'o'");
 
+    /* ---- Android Gboard IME dropped-input regressions + desktop non-duplication ---- */
+    console.log("\n== Android Gboard IME input recovery & zero desktop duplication ==");
+    const imeRes = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const ta = document.querySelector(".xterm-helper-textarea");
+        const flat = () => window.__busInput.flat().map((b) => String.fromCharCode(b)).join("");
+        ta.focus();
+
+        // Prime _keyDownSeen = true (matches typing earlier lines before reaching bottom line)
+        ta.dispatchEvent(new KeyboardEvent("keydown", { key: "a", keyCode: 65, bubbles: true }));
+        await wait(40);
+
+        // BUG A: Android Gboard sends InputEvent(insertText, composed:true) after _keyDownSeen=true
+        window.__busInput = [];
+        ta.value = "}";
+        ta.dispatchEvent(new InputEvent("beforeinput", { inputType: "insertText", data: "}", composed: true, bubbles: true }));
+        ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "}", composed: true, bubbles: true }));
+        await wait(60);
+        const bugA = flat();
+
+        // BUG B: Stale textarea.value="return 0;", then Gboard starts composition and commits "}"
+        window.__busInput = [];
+        ta.value = "return 0;";
+        ta.dispatchEvent(new CompositionEvent("compositionstart", { data: "", bubbles: true }));
+        ta.value = "}";
+        ta.dispatchEvent(new CompositionEvent("compositionupdate", { data: "}", bubbles: true }));
+        await wait(20);
+        ta.dispatchEvent(new CompositionEvent("compositionend", { data: "}", bubbles: true }));
+        await wait(60);
+        const bugB = flat();
+        const taAfterComp = ta.value;
+
+        // BUG C: #keybar Enter clears stale textarea so keydown(229) + "}" sends "}" (never Backspace 0x7f)
+        ta.value = "return 0;";
+        document.querySelector('#keybar [data-act="enter"]').dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "touch" })
+        );
+        await wait(40);
+        const taAfterKeybarEnter = ta.value;
+        window.__busInput = [];
+        ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Unidentified", keyCode: 229, bubbles: true }));
+        ta.value = "}";
+        await wait(60);
+        const bugC = flat();
+
+        // Gboard insertLineBreak normalizes to CR (0x0d), never LF (0x0a = nano Justify)
+        window.__busInput = [];
+        ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Unidentified", keyCode: 229, bubbles: true }));
+        ta.dispatchEvent(new InputEvent("beforeinput", { inputType: "insertLineBreak", composed: true, bubbles: true }));
+        ta.value = "\\n";
+        ta.dispatchEvent(new InputEvent("input", { inputType: "insertLineBreak", composed: true, bubbles: true }));
+        await wait(60);
+        const lineBreak = flat();
+
+        return JSON.stringify({ bugA, bugB, taAfterComp, taAfterKeybarEnter, bugC, lineBreak });
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    })).result.value);
+
+    // Real Chrome desktop keystrokes (keyDown + char + keyUp) must NEVER double-send!
+    await cdp.send("Runtime.evaluate", {
+      expression: `window.__busInput = []; document.querySelector(".xterm-helper-textarea").focus();`,
+    });
+    for (const ch of ["x", "y", "z"]) {
+      const code = ch.toUpperCase().charCodeAt(0);
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: ch, windowsVirtualKeyCode: code, text: ch });
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: ch, windowsVirtualKeyCode: code });
+      await sleep(10);
+    }
+    await sleep(60);
+    const desktopTyped = (await cdp.send("Runtime.evaluate", {
+      expression: `window.__busInput.flat().map((b) => String.fromCharCode(b)).join("")`,
+      returnByValue: true,
+    })).result.value;
+
+    check(imeRes.bugA === "}", `Android Gboard composed insertText delivers '}' once (got ${JSON.stringify(imeRes.bugA)})`);
+    check(imeRes.bugB === "}", `Android Gboard stale-textarea compositionend delivers '}' once (got ${JSON.stringify(imeRes.bugB)})`);
+    check(imeRes.taAfterComp === "", `helper textarea cleared after compositionend (got ${JSON.stringify(imeRes.taAfterComp)})`);
+    check(imeRes.taAfterKeybarEnter === "", `#keybar Enter clears stale helper textarea (got ${JSON.stringify(imeRes.taAfterKeybarEnter)})`);
+    check(imeRes.bugC === "}", `Android Gboard keyCode=229 after #keybar Enter delivers '}' not Backspace (got ${JSON.stringify(imeRes.bugC)})`);
+    check(imeRes.lineBreak === "\r", `Android Gboard insertLineBreak delivers CR '\\r' once (got ${JSON.stringify(imeRes.lineBreak)})`);
+    check(desktopTyped === "xyz", `desktop Chrome typing sends 'xyz' once with zero duplication (got ${JSON.stringify(desktopTyped)})`);
+
     // Resize re-fit
     const before = await geometry(cdp);
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });

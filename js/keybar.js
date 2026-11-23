@@ -21,6 +21,26 @@ export const KEY_SEQUENCES = Object.freeze({
   backspace: "\x7f",
 });
 
+const APP_CURSOR_SEQUENCES = Object.freeze({
+  up: "\x1bOA",
+  down: "\x1bOB",
+  right: "\x1bOC",
+  left: "\x1bOD",
+});
+
+function isTermComposing(term) {
+  return !!(term && term._core && term._core._compositionHelper &&
+            term._core._compositionHelper.isComposing);
+}
+
+function clearHelperTextarea(term, force) {
+  const ta = term && (term.textarea || (term.element &&
+    term.element.querySelector(".xterm-helper-textarea")));
+  if (!ta || ta.value === "") return;
+  if (!force && isTermComposing(term)) return;
+  ta.value = "";
+}
+
 /** Pure modifier transform (exported for unit tests). */
 export function applyModifiers(str, { ctrl = false, alt = false } = {}) {
   if (!str || str.length !== 1) return str;
@@ -105,8 +125,128 @@ export function attachKeyboardInterceptor(emulator) {
     }
   }
 
+  let xtermNativeSeq = 0;
+  let seqAtCycleStart = 0;
+  let compStartSeq = 0;
+  let lastXtermNativeAt = 0;
+  let lastKeydownAt = 0;
+  let lastLineBreakAt = 0;
+  let fallbackSending = false;
+  let clearTaTimer = null;
+
+  function sendFallback(str) {
+    if (!str || typeof term.input !== "function") return;
+    fallbackSending = true;
+    try {
+      term.input(str);
+    } finally {
+      fallbackSending = false;
+    }
+  }
+
+  // Dispose any prior textarea IME listeners on Restart.
+  if (adapter._glImeDispose) {
+    try { adapter._glImeDispose(); } catch (e) {}
+    adapter._glImeDispose = null;
+  }
+
+  // Android Chrome + Gboard IME guard:
+  // xterm.js 5.x drops `InputEvent(insertText, composed:true)` once _keyDownSeen
+  // is true, and CompositionHelper drops/corrupts input whenever textarea.value
+  // retains stale text from prior lines or #keybar taps. Track native xterm
+  // onData ticks and recover dropped inputs without ever double-sending.
+  const ta = term.textarea || (term.element &&
+    term.element.querySelector(".xterm-helper-textarea"));
+  if (ta) {
+    const onKeyDown = () => {
+      seqAtCycleStart = xtermNativeSeq;
+      lastKeydownAt = performance.now();
+    };
+    const onCompStart = () => {
+      compStartSeq = xtermNativeSeq;
+    };
+    const onBeforeInput = (e) => {
+      const now = performance.now();
+      if (now - lastXtermNativeAt < 5) return;
+      if (now - lastKeydownAt > 50) {
+        seqAtCycleStart = xtermNativeSeq;
+      }
+      if (e.inputType === "insertLineBreak") {
+        lastLineBreakAt = now;
+      }
+      if (e.inputType === "deleteContentBackward") {
+        const snap = seqAtCycleStart;
+        setTimeout(() => {
+          if (xtermNativeSeq === snap && !isTermComposing(term)) {
+            sendFallback("\x7f");
+            clearHelperTextarea(term, false);
+          }
+        }, 25);
+      }
+    };
+    const onInput = (e) => {
+      const now = performance.now();
+      if (now - lastXtermNativeAt < 5) return;
+      if (e.inputType === "insertLineBreak") {
+        lastLineBreakAt = now;
+        if (xtermNativeSeq !== seqAtCycleStart) return;
+        const snap = seqAtCycleStart;
+        setTimeout(() => {
+          if (xtermNativeSeq === snap && !isTermComposing(term)) {
+            sendFallback("\r");
+            clearHelperTextarea(term, false);
+          }
+        }, 25);
+        return;
+      }
+      if (e.inputType === "insertText" && e.data && !isTermComposing(term)) {
+        if (xtermNativeSeq !== seqAtCycleStart) return;
+        const text = e.data;
+        const snap = seqAtCycleStart;
+        setTimeout(() => {
+          if (xtermNativeSeq === snap && !isTermComposing(term)) {
+            sendFallback(text);
+            clearHelperTextarea(term, false);
+          }
+        }, 25);
+      }
+    };
+    const onCompEnd = (e) => {
+      const text = (e && e.data) || "";
+      const snap = compStartSeq;
+      setTimeout(() => {
+        if (text.length > 0 && xtermNativeSeq === snap && !isTermComposing(term)) {
+          sendFallback(text);
+        }
+        clearHelperTextarea(term, false);
+      }, 25);
+    };
+
+    ta.addEventListener("keydown", onKeyDown, true);
+    ta.addEventListener("compositionstart", onCompStart, true);
+    ta.addEventListener("beforeinput", onBeforeInput, true);
+    ta.addEventListener("input", onInput, false);
+    ta.addEventListener("compositionend", onCompEnd, false);
+    adapter._glImeDispose = () => {
+      ta.removeEventListener("keydown", onKeyDown, true);
+      ta.removeEventListener("compositionstart", onCompStart, true);
+      ta.removeEventListener("beforeinput", onBeforeInput, true);
+      ta.removeEventListener("input", onInput, false);
+      ta.removeEventListener("compositionend", onCompEnd, false);
+    };
+  }
+
   adapter.on_data_disposable = term.onData((raw) => {
+    if (!fallbackSending) {
+      xtermNativeSeq++;
+      lastXtermNativeAt = performance.now();
+    }
     let data = raw;
+    // Normalize single LF from Android Gboard insertLineBreak to CR so nano
+    // inserts a newline instead of triggering Ctrl-J (Justify paragraph).
+    if (data === "\n" && performance.now() - lastLineBreakAt < 60) {
+      data = "\r";
+    }
     if ((latchedCtrl || latchedAlt) && data.length === 1) {
       data = applyModifiers(data, { ctrl: latchedCtrl, alt: latchedAlt });
       clearLatches();
@@ -125,16 +265,22 @@ export function attachKeyboardInterceptor(emulator) {
     } else {
       for (const b of bytes) emulator.bus.send("serial0-input", b);
     }
+
+    if (ta && !isTermComposing(term)) {
+      clearTimeout(clearTaTimer);
+      clearTaTimer = setTimeout(() => clearHelperTextarea(term, false), 0);
+    }
   });
 }
 
-function sendToTerm(str) {
+function sendToTerm(str, clearTa = false) {
   const term = currentTerminal();
   if (!term) return;
   try {
     if (typeof term.input === "function") {
       term.input(str);
     }
+    if (clearTa) clearHelperTextarea(term, true);
   } catch (e) {
     console.warn("key send failed:", e);
   }
@@ -179,19 +325,24 @@ export function handleKeyButton(btn) {
 
   if (act === "esc") {
     clearLatches();
-    sendToTerm("\x1b");
+    sendToTerm("\x1b", true);
     return;
   }
 
   if (KEY_SEQUENCES[act]) {
     clearLatches();
-    sendToTerm(KEY_SEQUENCES[act]);
+    const term = currentTerminal();
+    const seq = (APP_CURSOR_SEQUENCES[act] && term && term.modes &&
+                 term.modes.applicationCursorKeysMode)
+      ? APP_CURSOR_SEQUENCES[act]
+      : KEY_SEQUENCES[act];
+    sendToTerm(seq, true);
     return;
   }
 
   if (sym !== undefined) {
     // Let term.onData apply any latched Ctrl/Alt once so it is never double-applied.
-    sendToTerm(sym);
+    sendToTerm(sym, false);
   }
 }
 

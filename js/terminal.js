@@ -115,6 +115,15 @@ function syncTerminalStyle(term) {
     term.options.cursorBlink = true;
     term.options.cursorStyle = "bar";
 
+    const ta = term.textarea;
+    if (ta) {
+      ta.setAttribute("autocomplete", "off");
+      ta.setAttribute("autocorrect", "off");
+      ta.setAttribute("autocapitalize", "off");
+      ta.setAttribute("spellcheck", "false");
+      ta.setAttribute("enterkeyhint", "enter");
+    }
+
     // When a full-screen TUI (nano, vi, less, man, htop, tmux) enters the
     // alternate screen buffer, flush any deferred height-only resize once
     // the app finishes initscr()/signal_init() so it catches SIGWINCH and
@@ -132,7 +141,7 @@ function syncTerminalStyle(term) {
             clearTimeout(resizeDebounceTimer);
             resizeDebounceTimer = null;
             sendVirtioResizeNow(getEmulator(), appliedCols, appliedRows);
-          }, 150);
+          }, 220);
         }
       });
     }
