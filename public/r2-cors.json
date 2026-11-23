@@ -4,7 +4,8 @@
       "allowed": {
         "origins": [
           "https://golinux.app",
-          "https://YOUR-PROJECT.pages.dev"
+          "https://www.golinux.app",
+          "https://terminal.golinux.app"
         ],
         "methods": ["GET", "HEAD"],
         "headers": ["Range", "If-None-Match", "If-Modified-Since"]

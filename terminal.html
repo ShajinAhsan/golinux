@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>GoLinux Terminal</title>
+<meta name="description" content="Debian 12 Linux terminal running 100% locally in your browser via WebAssembly.">
+<meta name="theme-color" content="#080b11">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="assets/xterm/xterm.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <header id="bar">
+    <a id="brandLink" href="https://golinux.app" title="GoLinux Home" aria-label="GoLinux Home">
+      <span class="brand-glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="5 8 10 12 5 16"></polyline>
+          <line x1="12" y1="16" x2="19" y2="16"></line>
+        </svg>
+      </span>
+      <b>GoLinux</b>
+    </a>
+
+    <span class="status-pill" aria-live="polite">
+      <span id="statusDot" class="s-dot" aria-hidden="true"></span>
+      <span id="status">starting…</span>
+    </span>
+
+    <span id="persistStatus" aria-live="polite"></span>
+
+    <div id="barActions">
+      <button id="uploadBtn" class="wide-only ghost-btn" data-feature="upload" title="Upload files into /mnt/host (max 50 MB)">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Upload
+      </button>
+      <button id="downloadBtn" class="wide-only ghost-btn" data-feature="download" title="Download files from /mnt/host">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download
+      </button>
+      <button id="openPacks" class="wide-only ghost-btn" data-feature="packs">Offline packs</button>
+      <button id="restart" class="ghost-btn" data-feature="restartButton" title="Restart virtual machine">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        <span class="btn-lbl">Restart</span>
+      </button>
+      <button id="resetBtn" class="wide-only ghost-btn danger-btn" title="Discard saved session and start fresh">Reset</button>
+      <a id="aboutLink" class="wide-only nav-link" href="about.html">About</a>
+      <button id="barMenuBtn" class="ghost-btn" aria-haspopup="true" aria-expanded="false" aria-label="More actions">⋮</button>
+    </div>
+
+    <div id="barMenu" role="menu" hidden>
+      <button id="mUpload" role="menuitem" data-feature="upload">Upload to /mnt/host</button>
+      <button id="mDownload" role="menuitem" data-feature="download">Download from /mnt/host</button>
+      <button id="mPacks" role="menuitem" data-feature="packs">Save for offline use</button>
+      <button id="mReset" role="menuitem" class="danger-item">Reset machine</button>
+      <a id="mAbout" role="menuitem" href="about.html">About &amp; Licenses</a>
+    </div>
+
+    <input type="file" id="uploadInput" multiple hidden>
+  </header>
+
+  <div id="progress" class="bar" aria-live="polite">
+    <span class="label">Downloading snapshot</span>
+    <div class="track"><div class="fill" id="progressFill"></div></div>
+    <span class="pct" id="progressPct">0%</span>
+  </div>
+
+  <div id="packProgress" class="bar" aria-live="polite" data-feature="packs">
+    <span class="label" id="packProgressLabel">Downloading pack</span>
+    <div class="track"><div class="fill" id="packProgressFill"></div></div>
+    <span class="pct" id="packProgressPct"></span>
+    <button id="packPause">Pause</button>
+    <button id="packCancel">Cancel</button>
+  </div>
+
+  <div id="offlineBanner" role="status">
+    <span class="grow">
+      You are offline and some disk data is not cached — commands you haven't
+      run yet may not load until you reconnect.
+    </span>
+    <button id="offlineBannerOpen" data-feature="packs">Offline packs</button>
+    <button id="offlineBannerDismiss" aria-label="Dismiss">Dismiss</button>
+  </div>
+
+  <div id="packs" role="dialog" aria-modal="true" aria-labelledby="packsTitle" data-feature="packs">
+    <div id="packsBox" class="modal-box">
+      <h2 id="packsTitle">Save for offline use</h2>
+      <p class="hint">
+        GoLinux works offline for anything already cached. Pick a pack to cache
+        more of the disk now.
+      </p>
+      <p id="saveDataNote">
+        Save-Data is on or your connection looks slow. You can still install a pack below.
+      </p>
+
+      <div class="pack" data-pack="minimal">
+        <div class="meta">
+          <strong>Minimal</strong><span class="size" data-size="minimal"></span>
+          <span class="badge" data-badge="minimal"></span>
+          <div class="desc">Snapshot only — boots instantly.</div>
+        </div>
+        <div class="actions"><button data-install="minimal">Use</button></div>
+      </div>
+
+      <div class="pack" data-pack="common">
+        <div class="meta">
+          <strong>Common tools</strong><span class="size" data-size="common"></span>
+          <span class="badge" data-badge="common"></span>
+          <div class="desc">ls, nano, git, gcc, g++, make, man and dependencies.</div>
+        </div>
+        <div class="actions">
+          <button data-install="common">Save</button>
+          <button data-remove="common">Remove</button>
+        </div>
+      </div>
+
+      <div class="pack" data-pack="full">
+        <div class="meta">
+          <strong>Full disk</strong><span class="size" data-size="full"></span>
+          <span class="badge" data-badge="full"></span>
+          <div class="desc">Every data chunk of the disk image.</div>
+        </div>
+        <div class="actions">
+          <button data-install="full">Save</button>
+          <button data-remove="full">Remove</button>
+        </div>
+      </div>
+
+      <div id="packStatus"></div>
+      <div id="packsFooter">
+        <span id="packQuota"></span>
+        <button id="closePacks" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="filesModal" role="dialog" aria-modal="true" aria-labelledby="filesTitle" data-feature="download">
+    <div id="filesBox" class="modal-box">
+      <h2 id="filesTitle">Download from /mnt/host</h2>
+      <p class="hint">
+        Copy files into <code>/mnt/host</code> first — e.g.
+        <code>cp main.c /mnt/host/</code> or
+        <code>tar czf /mnt/host/root.tar.gz -C / root</code>.
+        Files here are temporary and not saved across reloads.
+      </p>
+      <div id="filesList"></div>
+      <div id="filesStatus"></div>
+      <div id="filesFooter">
+        <button id="refreshFiles" type="button">Refresh</button>
+        <button id="closeFiles" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <main id="terminal">
+    <div id="diskToast" aria-live="polite">
+      <span class="toast-dot" aria-hidden="true"></span>
+      <span id="diskLabel">Loading from disk…</span>
+      <span class="disk-sub" id="diskSub"></span>
+    </div>
+  </main>
+
+  <div id="loading" aria-live="polite">
+    <div class="loading-card">
+      <div class="spin"></div>
+      <div class="title" id="loadingTitle">Starting…</div>
+      <div class="detail" id="loadingDetail"></div>
+    </div>
+  </div>
+
+  <div id="keybar" aria-label="Terminal keys">
+    <div class="kb-row">
+      <button data-act="ctrl" aria-pressed="false" aria-label="Control (one-shot)">Ctrl</button>
+      <button data-act="alt" aria-pressed="false" aria-label="Alt (one-shot)">Alt</button>
+      <button data-act="esc" aria-label="Escape">Esc</button>
+      <button data-act="tab" aria-label="Tab">Tab</button>
+      <button data-act="keyboard" aria-label="Show or hide the keyboard">⌨</button>
+      <button data-act="more" aria-label="More keys" aria-expanded="false">⋯</button>
+    </div>
+    <div class="kb-row">
+      <button data-act="left" aria-label="Left arrow">←</button>
+      <button data-act="up" aria-label="Up arrow">↑</button>
+      <button data-act="down" aria-label="Down arrow">↓</button>
+      <button data-act="right" aria-label="Right arrow">→</button>
+      <button data-act="enter" aria-label="Enter">⏎</button>
+      <button data-act="backspace" aria-label="Backspace">⌫</button>
+    </div>
+    <div class="kb-row kb-extra" hidden>
+      <button data-sym="|">|</button>
+      <button data-sym="/">/</button>
+      <button data-sym="~">~</button>
+      <button data-sym="-">-</button>
+      <button data-sym="_">_</button>
+      <button data-sym=":">:</button>
+      <button data-sym="*">*</button>
+      <button data-sym="$">$</button>
+      <button data-sym="x">x</button>
+      <button data-sym="c">c</button>
+      <button data-sym="z">z</button>
+    </div>
+  </div>
+
+  <div id="fatal" role="alertdialog" aria-labelledby="fatalTitle">
+    <div class="box">
+      <div class="fatal-title" id="fatalTitle">Cannot start</div>
+      <div class="fatal-detail"></div>
+      <div class="fatal-hint">
+        If this keeps happening, try a normal (non-private) window with
+        service workers enabled, then reload.
+      </div>
+      <div class="fatal-actions">
+        <button id="fatalReload" type="button">Reload page</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="packs-config.js"></script>
+<script src="packs.js"></script>
+<script src="persist.js"></script>
+<script src="persist-9p.js"></script>
+<script src="assets/xterm/xterm.js"></script>
+<script src="assets/v86/libv86.js"></script>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

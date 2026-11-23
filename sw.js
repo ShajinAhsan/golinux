@@ -403,7 +403,7 @@ self.addEventListener("fetch", (event) => {
 
   // HTML navigations: network-first with cache fallback so code deploys appear
   // immediately on reload while keeping full offline support.
-  if (request.mode === "navigate" || url.pathname === "/" || url.pathname.endsWith("/index.html")) {
+  if (request.mode === "navigate" || url.pathname === "/" || url.pathname.endsWith("/index.html") || url.pathname.endsWith("/terminal.html")) {
     event.respondWith((async () => {
       const shell = await caches.open(GL_SHELL_CACHE);
       try {

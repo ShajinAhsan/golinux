@@ -2,206 +2,349 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<title>GoLinux</title>
-<meta name="theme-color" content="#0b0d10">
-<link rel="manifest" href="manifest.json">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>GoLinux — Real Debian Linux inside your browser</title>
+<meta name="description" content="A real CLI-only Debian 12 Linux machine running 100% in your browser via WebAssembly. Boots in under a second. No server, no signup, works offline.">
+<meta name="theme-color" content="#06080d">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
-<link rel="stylesheet" href="assets/xterm/xterm.css">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="landing.css">
 </head>
 <body>
-<div id="app">
-  <div id="bar">
-    <b>GoLinux</b>
-    <span id="status">starting…</span>
-    <span id="persistStatus" aria-live="polite"></span>
+  <div class="aurora" aria-hidden="true"></div>
 
-    <div id="barActions">
-      <button id="restart" data-feature="restartButton">Restart</button>
-      <button id="openPacks" class="wide-only" data-feature="packs">Save for offline use</button>
-      <button id="uploadBtn" class="wide-only" data-feature="upload" title="Send files into /mnt/host (max 50 MB)">Upload</button>
-      <button id="downloadBtn" class="wide-only" data-feature="download" title="Download files from /mnt/host">Download</button>
-      <button id="resetBtn" class="wide-only" title="Discard saved session and start fresh">Reset</button>
-      <a id="aboutLink" class="wide-only nav-link" href="about.html">About</a>
-      <button id="barMenuBtn" aria-haspopup="true" aria-expanded="false" aria-label="More actions">⋮</button>
+  <header class="nav">
+    <div class="wrap nav-inner">
+      <a class="brand" href="./" aria-label="GoLinux home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="5 8 10 12 5 16"></polyline>
+            <line x1="12" y1="16" x2="19" y2="16"></line>
+          </svg>
+        </span>
+        <span class="brand-name">GoLinux</span>
+      </a>
+
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#how-it-works">How it works</a>
+        <a href="#tools">Tools</a>
+        <a href="#features">Features</a>
+        <a href="about.html">About</a>
+      </nav>
+
+      <a class="btn btn-primary btn-sm" data-launch-url href="https://terminal.golinux.app">
+        Try GoLinux
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 10h12M11 5l5 5-5 5"></path>
+        </svg>
+      </a>
     </div>
+  </header>
 
-    <div id="barMenu" role="menu" hidden>
-      <button id="mPacks" role="menuitem" data-feature="packs">Save for offline use</button>
-      <button id="mUpload" role="menuitem" data-feature="upload">Upload</button>
-      <button id="mDownload" role="menuitem" data-feature="download">Download</button>
-      <button id="mReset" role="menuitem">Reset</button>
-      <a id="mAbout" role="menuitem" href="about.html">About</a>
-    </div>
-
-    <input type="file" id="uploadInput" multiple hidden>
-  </div>
-
-  <div id="progress" class="bar" aria-live="polite">
-    <span class="label">Downloading snapshot</span>
-    <div class="track"><div class="fill" id="progressFill"></div></div>
-    <span class="pct" id="progressPct">0%</span>
-  </div>
-
-  <div id="packProgress" class="bar" aria-live="polite" data-feature="packs">
-    <span class="label" id="packProgressLabel">Downloading pack</span>
-    <div class="track"><div class="fill" id="packProgressFill"></div></div>
-    <span class="pct" id="packProgressPct"></span>
-    <button id="packPause">Pause</button>
-    <button id="packCancel">Cancel</button>
-  </div>
-
-  <div id="offlineBanner" role="status">
-    <span class="grow">
-      You are offline and some disk data is not cached — commands you have not
-      run yet may not load until you reconnect.
-    </span>
-    <button id="offlineBannerOpen" data-feature="packs">Save for offline use</button>
-    <button id="offlineBannerDismiss" aria-label="Dismiss">Dismiss</button>
-  </div>
-
-  <div id="packs" role="dialog" aria-modal="true" aria-labelledby="packsTitle" data-feature="packs">
-    <div id="packsBox">
-      <h2 id="packsTitle">Save for offline use</h2>
-      <p class="hint">
-        GoLinux works offline for anything already cached. Pick a pack to cache
-        more of the disk now, so more commands keep working without a network.
-      </p>
-      <p id="saveDataNote">
-        Save-Data is on or your connection looks slow, so packs are not
-        suggested automatically. You can still install one below.
-      </p>
-
-      <div class="pack" data-pack="minimal">
-        <div class="meta">
-          <strong>Minimal</strong><span class="size" data-size="minimal"></span>
-          <span class="badge" data-badge="minimal"></span>
-          <div class="desc">Snapshot only — boots instantly. The default.</div>
+  <main>
+    <!-- ================= HERO ================= -->
+    <section class="hero">
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <div class="eyebrow">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            Debian 12 · WebAssembly · Zero Backend
+          </div>
+          <h1>A real Linux machine,<br><span class="grad-text">right in your browser tab.</span></h1>
+          <p class="lead">
+            Full Debian bookworm with <code>gcc</code>, <code>g++</code>, <code>git</code>,
+            <code>make</code>, <code>nano</code>, and <code>man</code> — running 100% locally on your
+            device. No cloud server, no signup, instant snapshot boot.
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary btn-lg" data-launch-url href="https://terminal.golinux.app">
+              Try GoLinux Terminal
+              <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 10h12M11 5l5 5-5 5"></path>
+              </svg>
+            </a>
+            <a class="btn btn-ghost btn-lg" href="#how-it-works">See how it works</a>
+          </div>
+          <div class="hero-meta">
+            <span><strong>&lt;1s</strong> snapshot wake</span>
+            <span class="sep" aria-hidden="true">·</span>
+            <span><strong>~13 MB</strong> first load</span>
+            <span class="sep" aria-hidden="true">·</span>
+            <span><strong>0</strong> server compute</span>
+          </div>
         </div>
-        <div class="actions">
-          <button data-install="minimal">Use</button>
-        </div>
-      </div>
 
-      <div class="pack" data-pack="common">
-        <div class="meta">
-          <strong>Common tools</strong><span class="size" data-size="common"></span>
-          <span class="badge" data-badge="common"></span>
-          <div class="desc">ls, nano, git, gcc, g++, make, man and their dependencies.</div>
-        </div>
-        <div class="actions">
-          <button data-install="common">Save</button>
-          <button data-remove="common">Remove</button>
-        </div>
-      </div>
-
-      <div class="pack" data-pack="full">
-        <div class="meta">
-          <strong>Full disk</strong><span class="size" data-size="full"></span>
-          <span class="badge" data-badge="full"></span>
-          <div class="desc">Every data chunk of the disk image. Nothing left to fetch.</div>
-        </div>
-        <div class="actions">
-          <button data-install="full">Save</button>
-          <button data-remove="full">Remove</button>
+        <div class="hero-visual">
+          <div class="term-window" aria-label="Interactive terminal preview">
+            <div class="term-chrome">
+              <div class="term-dots" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </div>
+              <div class="term-title">terminal.golinux.app — hvc0</div>
+              <div class="term-badge"><span class="dot-ok"></span>WASM</div>
+            </div>
+            <div class="term-body" id="heroTerm">
+              <div class="t-line"><span class="t-dim">GoLinux · Debian 12 (bookworm) i386 · local WebAssembly VM</span></div>
+              <div class="t-line"><span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> <span class="t-cmd">ls -F</span></div>
+              <div class="t-line t-cols">
+                <span class="c-dir">projects/</span>
+                <span class="c-dir">notes/</span>
+                <span class="c-c">hello.c</span>
+                <span class="c-exec">build.sh*</span>
+                <span class="c-arc">backup.tar.gz</span>
+              </div>
+              <div class="t-line"><span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> <span class="t-cmd" id="heroTyped">gcc hello.c -o hello &amp;&amp; ./hello</span><span class="t-cursor" aria-hidden="true"></span></div>
+              <div class="t-line" id="heroOutput"><span class="c-exec">Hello from Debian inside WebAssembly!</span></div>
+            </div>
+          </div>
         </div>
       </div>
+    </section>
 
-      <div id="packStatus"></div>
+    <!-- ================= HOW IT WORKS (ANIMATED) ================= -->
+    <section class="section" id="how-it-works">
+      <div class="wrap">
+        <div class="section-head">
+          <div class="kicker">How does it work?</div>
+          <h2>No cloud server. Just smart browser engineering.</h2>
+          <p>
+            Follow the animation below — even if you've never touched Linux before, here is exactly
+            what happens from the moment you open <strong>terminal.golinux.app</strong>.
+          </p>
+        </div>
 
-      <div id="packsFooter">
-        <span id="packQuota" style="font-size:12px;color:#77828d"></span>
-        <button id="closePacks">Close</button>
+        <div class="how-card">
+          <div class="how-stage">
+            <div class="how-toolbar">
+              <span class="how-pill" id="howStepTag">Step 1 of 4</span>
+              <span class="how-caption" id="howCaption">Your browser starts a tiny virtual PC using WebAssembly — nothing runs on a remote server.</span>
+              <button class="btn-icon" id="howToggle" type="button" aria-label="Pause animation">
+                <span id="howToggleLabel">Pause</span>
+              </button>
+            </div>
+
+            <div class="arch-svg-wrap">
+              <svg id="archSvg" class="arch-svg" viewBox="0 0 880 280" role="img" aria-label="Animated diagram showing Edge Storage, Browser Cache, WebAssembly Virtual PC, and Local Private Storage">
+                <defs>
+                  <linearGradient id="g-line" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stop-color="#34d399" stop-opacity="0.25"/>
+                    <stop offset="50%" stop-color="#38bdf8" stop-opacity="0.8"/>
+                    <stop offset="100%" stop-color="#a78bfa" stop-opacity="0.25"/>
+                  </linearGradient>
+                  <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+                    <feGaussianBlur stdDeviation="4" result="blur"/>
+                    <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+                  </filter>
+                </defs>
+
+                <!-- Browser boundary box -->
+                <rect x="242" y="18" width="620" height="244" rx="18" class="svg-browser-box"/>
+                <text x="262" y="42" class="svg-zone-label">YOUR BROWSER TAB (100% ON YOUR DEVICE)</text>
+                <text x="24" y="42" class="svg-zone-label">EDGE CDN (STATIC FILES)</text>
+
+                <!-- Connection paths -->
+                <path id="path-r2-sw" d="M 196 142 L 278 142" class="svg-link"/>
+                <path id="path-sw-vm" d="M 434 142 L 500 142" class="svg-link"/>
+                <path id="path-vm-opfs" d="M 664 142 L 716 142" class="svg-link"/>
+
+                <!-- Animated data packets -->
+                <g class="packet p-r2-sw" filter="url(#glow)">
+                  <circle r="5.5" fill="#38bdf8"/>
+                </g>
+                <g class="packet p-sw-vm" filter="url(#glow)">
+                  <circle r="5.5" fill="#34d399"/>
+                </g>
+                <g class="packet p-vm-opfs" filter="url(#glow)">
+                  <circle r="5.5" fill="#c084fc"/>
+                </g>
+
+                <!-- Node 1: Edge Storage -->
+                <g class="svg-node" data-node="edge">
+                  <rect x="24" y="82" width="172" height="120" rx="14" class="node-bg"/>
+                  <rect x="42" y="102" width="32" height="24" rx="5" class="node-icon-box"/>
+                  <line x1="49" y1="110" x2="67" y2="110" class="node-icon-stroke"/>
+                  <line x1="49" y1="118" x2="62" y2="118" class="node-icon-stroke"/>
+                  <text x="42" y="148" class="node-title">5,600 Disk Slices</text>
+                  <text x="42" y="167" class="node-sub">128 KB compressed</text>
+                  <text x="42" y="184" class="node-sub">files on Cloudflare R2</text>
+                </g>
+
+                <!-- Node 2: Service Worker Cache -->
+                <g class="svg-node" data-node="sw">
+                  <rect x="278" y="82" width="156" height="120" rx="14" class="node-bg"/>
+                  <circle cx="312" cy="114" r="13" class="node-icon-box"/>
+                  <path d="M 307 114 L 311 118 L 318 110" class="node-icon-stroke" fill="none"/>
+                  <text x="296" y="148" class="node-title">Smart Cache</text>
+                  <text x="296" y="167" class="node-sub">Fetches only what</text>
+                  <text x="296" y="184" class="node-sub">you use, then caches</text>
+                </g>
+
+                <!-- Node 3: WebAssembly Virtual PC -->
+                <g class="svg-node" data-node="vm">
+                  <rect x="500" y="72" width="164" height="140" rx="14" class="node-bg node-bg-main"/>
+                  <rect x="518" y="92" width="34" height="24" rx="5" class="node-icon-box"/>
+                  <path d="M 526 100 L 531 104 L 526 108 M 534 108 L 543 108" class="node-icon-stroke" fill="none"/>
+                  <text x="518" y="140" class="node-title">Virtual x86 PC</text>
+                  <text x="518" y="159" class="node-sub">Debian 12 in WASM</text>
+                  <text x="518" y="176" class="node-sub">256 MB RAM · xterm</text>
+                  <text x="518" y="196" class="node-chip">Wakes in &lt;1 sec</text>
+                </g>
+
+                <!-- Node 4: Private OPFS Vault -->
+                <g class="svg-node" data-node="opfs">
+                  <rect x="716" y="82" width="128" height="120" rx="14" class="node-bg"/>
+                  <rect x="734" y="102" width="26" height="22" rx="5" class="node-icon-box"/>
+                  <circle cx="747" cy="113" r="3" class="node-icon-stroke" fill="none"/>
+                  <text x="734" y="148" class="node-title">Private Vault</text>
+                  <text x="734" y="167" class="node-sub">Saved in OPFS</text>
+                  <text x="734" y="184" class="node-sub">on your device</text>
+                </g>
+              </svg>
+            </div>
+          </div>
+
+          <div class="how-steps" role="tablist" aria-label="Architecture steps">
+            <button class="how-step active" type="button" role="tab" aria-selected="true" data-step="0">
+              <span class="step-num">01</span>
+              <strong>Browser = Virtual PC</strong>
+              <span>WebAssembly emulates a real x86 CPU right inside your tab. No backend servers exist.</span>
+            </button>
+            <button class="how-step" type="button" role="tab" aria-selected="false" data-step="1">
+              <span class="step-num">02</span>
+              <strong>Instant Snapshot Boot</strong>
+              <span>Instead of a 20-second boot, a ~13 MB saved memory snapshot wakes Debian straight at your prompt.</span>
+            </button>
+            <button class="how-step" type="button" role="tab" aria-selected="false" data-step="2">
+              <span class="step-num">03</span>
+              <strong>Lazy 128 KB Disk Blocks</strong>
+              <span>Run <code>gcc</code> and only the blocks it reads stream from edge storage into your cache — later runs are instant.</span>
+            </button>
+            <button class="how-step" type="button" role="tab" aria-selected="false" data-step="3">
+              <span class="step-num">04</span>
+              <strong>Saved Privately on Device</strong>
+              <span>Your files in <code>/root</code> auto-save to browser storage (OPFS) and survive reloads, never leaving your device.</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= WHAT'S INSIDE ================= -->
+    <section class="section" id="tools">
+      <div class="wrap">
+        <div class="section-head">
+          <div class="kicker">What's inside</div>
+          <h2>Real Debian 12 tools, ready to run.</h2>
+          <p>Not a fake JavaScript shell mock. Real ELF binaries compiled for Linux i386.</p>
+        </div>
+
+        <div class="tools-shell">
+          <div class="tool-pills" role="tablist" aria-label="Included tools">
+            <button class="tool-pill active" type="button" role="tab" aria-selected="true" data-tool="gcc">gcc / g++</button>
+            <button class="tool-pill" type="button" role="tab" aria-selected="false" data-tool="git">git</button>
+            <button class="tool-pill" type="button" role="tab" aria-selected="false" data-tool="nano">nano</button>
+            <button class="tool-pill" type="button" role="tab" aria-selected="false" data-tool="make">make</button>
+            <button class="tool-pill" type="button" role="tab" aria-selected="false" data-tool="man">man pages</button>
+            <button class="tool-pill" type="button" role="tab" aria-selected="false" data-tool="ls">vibrant shell</button>
+          </div>
+
+          <div class="tool-preview">
+            <div class="term-window term-window-compact">
+              <div class="term-chrome">
+                <div class="term-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+                <div class="term-title" id="toolTitle">gcc / g++ — Compile real C and C++</div>
+                <a class="term-try" data-launch-url href="https://terminal.golinux.app">Try it →</a>
+              </div>
+              <pre class="term-body term-pre" id="toolCode"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= BENTO FEATURES ================= -->
+    <section class="section" id="features">
+      <div class="wrap">
+        <div class="section-head">
+          <div class="kicker">Built for focus</div>
+          <h2>Fast, private, and actually usable on phones.</h2>
+        </div>
+
+        <div class="bento">
+          <article class="card card-wide">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+            </div>
+            <h3>First-class mobile terminal</h3>
+            <p>
+              Built with a two-row touch key bar (<code>Ctrl</code>, <code>Alt</code>, <code>Esc</code>,
+              <code>Tab</code>, arrows) that latches cleanly with your phone's native keyboard, plus
+              real <code>virtio-console</code> window resizing when you rotate your screen.
+            </p>
+          </article>
+
+          <article class="card">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+            <h3>Private &amp; offline-safe</h3>
+            <p>
+              Zero analytics, zero tracking, and guest networking is off by design. Experiment freely,
+              break anything, and hit <strong>Reset</strong> for a clean Debian install in a second.
+            </p>
+          </article>
+
+          <article class="card">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <h3>Instant file transfer</h3>
+            <p>
+              Drag and drop files directly onto the terminal to land in <code>/mnt/host</code>, or
+              copy results back into <code>/mnt/host</code> to download them cleanly to your device.
+            </p>
+          </article>
+
+          <article class="card card-wide card-specs">
+            <div class="specs-grid">
+              <div><span class="spec-val">Debian 12</span><span class="spec-lbl">Bookworm i386</span></div>
+              <div><span class="spec-val">256 MB</span><span class="spec-lbl">Guest RAM</span></div>
+              <div><span class="spec-val">5 GB</span><span class="spec-lbl">Virtual ext4 disk</span></div>
+              <div><span class="spec-val">0 bytes</span><span class="spec-lbl">Sent to servers</span></div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= FINAL CTA ================= -->
+    <section class="section section-cta">
+      <div class="wrap">
+        <div class="cta-box">
+          <h2>Ready to open a shell?</h2>
+          <p>No sign-up, no install, no waiting. Boot Debian 12 in your browser right now.</p>
+          <a class="btn btn-primary btn-lg" data-launch-url href="https://terminal.golinux.app">
+            Try GoLinux Now
+            <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 10h12M11 5l5 5-5 5"></path>
+            </svg>
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <span>GoLinux — MIT licensed · Powered by v86, xterm.js, SeaBIOS &amp; Debian.</span>
+      <div class="footer-links">
+        <a data-launch-url href="https://terminal.golinux.app">Terminal</a>
+        <a href="about.html">Licenses &amp; About</a>
+        <a href="https://github.com/ShajinAhsan/golinux" rel="noopener">GitHub</a>
       </div>
     </div>
-  </div>
+  </footer>
 
-  <div id="filesModal" role="dialog" aria-modal="true" aria-labelledby="filesTitle" data-feature="download">
-    <div id="filesBox">
-      <h2 id="filesTitle">Download files from /mnt/host</h2>
-      <p class="hint">
-        Copy files into <code>/mnt/host</code> from the terminal first — e.g.
-        <code>cp main.c /mnt/host/</code> or
-        <code>tar czf /mnt/host/root.tar.gz -C / root</code>.
-        Files in <code>/mnt/host</code> are temporary and are not saved across reloads.
-      </p>
-      <div id="filesList"></div>
-      <div id="filesStatus"></div>
-      <div id="filesFooter">
-        <button id="refreshFiles" type="button">Refresh</button>
-        <button id="closeFiles" type="button">Close</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="terminal">
-    <div id="diskToast" aria-live="polite">
-      <span id="diskLabel">Loading from disk…</span>
-      <span class="disk-sub" id="diskSub"></span>
-    </div>
-  </div>
-
-  <div id="loading" aria-live="polite">
-    <div class="spin"></div>
-    <div class="title" id="loadingTitle">Starting…</div>
-    <div class="detail" id="loadingDetail"></div>
-  </div>
-
-  <div id="keybar" aria-label="Terminal keys">
-    <div class="kb-row">
-      <button data-act="ctrl" aria-pressed="false" aria-label="Control (one-shot)">Ctrl</button>
-      <button data-act="alt" aria-pressed="false" aria-label="Alt (one-shot)">Alt</button>
-      <button data-act="esc" aria-label="Escape">Esc</button>
-      <button data-act="tab" aria-label="Tab">Tab</button>
-      <button data-act="keyboard" aria-label="Show or hide the keyboard">⌨</button>
-      <button data-act="more" aria-label="More keys" aria-expanded="false">⋯</button>
-    </div>
-    <div class="kb-row">
-      <button data-act="left" aria-label="Left arrow">←</button>
-      <button data-act="up" aria-label="Up arrow">↑</button>
-      <button data-act="down" aria-label="Down arrow">↓</button>
-      <button data-act="right" aria-label="Right arrow">→</button>
-      <button data-act="enter" aria-label="Enter">⏎</button>
-      <button data-act="backspace" aria-label="Backspace">⌫</button>
-    </div>
-    <div class="kb-row kb-extra" hidden>
-      <button data-sym="|">|</button>
-      <button data-sym="/">/</button>
-      <button data-sym="~">~</button>
-      <button data-sym="-">-</button>
-      <button data-sym="_">_</button>
-      <button data-sym=":">:</button>
-      <button data-sym="*">*</button>
-      <button data-sym="$">$</button>
-      <button data-sym="x">x</button>
-      <button data-sym="c">c</button>
-      <button data-sym="z">z</button>
-    </div>
-  </div>
-
-  <div id="fatal" role="alertdialog" aria-labelledby="fatalTitle">
-    <div class="box">
-      <div class="fatal-title" id="fatalTitle">Cannot start</div>
-      <div class="fatal-detail"></div>
-      <div class="fatal-hint">
-        If this keeps happening, try a normal (non-private) window with
-        service workers enabled, then reload.
-      </div>
-      <div class="fatal-actions">
-        <button id="fatalReload" type="button">Reload page</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script src="packs-config.js"></script>
-<script src="packs.js"></script>
-<script src="persist.js"></script>
-<script src="persist-9p.js"></script>
-<script src="assets/xterm/xterm.js"></script>
-<script src="assets/v86/libv86.js"></script>
-<script type="module" src="js/main.js"></script>
+  <script src="js/landing.js" defer></script>
 </body>
 </html>

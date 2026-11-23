@@ -8,11 +8,24 @@
   // account, and nothing in this file is sensitive. Do not add tokens.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "golinux",
+  "main": "worker.js",
   "compatibility_date": "2026-11-23",
 
+  "routes": [
+    { "pattern": "golinux.app", "custom_domain": true },
+    { "pattern": "www.golinux.app", "custom_domain": true },
+    { "pattern": "terminal.golinux.app", "custom_domain": true }
+  ],
+
   "assets": {
-    // Written by tools/deploy/build-pages.sh. Contains the app shell, wasm,
-    // kernel/initrd/snapshot and _headers; chunks and packs live on R2.
-    "directory": ".deploy-pages"
+    // Written by tools/deploy/build-pages.sh. Contains the landing page,
+    // terminal app shell, wasm, kernel/initrd/snapshot and _headers; chunks
+    // and packs live on R2.
+    "directory": ".deploy-pages",
+    "binding": "ASSETS",
+    "html_handling": "none",
+    // Only invoke worker.js for root/HTML subdomain routing; all static files
+    // (JS, CSS, WASM, images, sw.js) are served directly from edge assets.
+    "run_worker_first": ["/", "/index.html", "/terminal", "/terminal/"]
   }
 }

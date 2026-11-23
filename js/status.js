@@ -16,6 +16,12 @@ export function fmtBytes(bytes) {
 export function setStatus(text) {
   const el = $("status");
   if (el) el.textContent = text;
+  const dot = $("statusDot");
+  if (dot) {
+    const t = String(text || "").toLowerCase();
+    dot.classList.toggle("ok", t === "running");
+    dot.classList.toggle("err", t === "cannot start" || t === "outdated" || t === "stopped" || t.includes("failed"));
+  }
 }
 
 export function setPersistStatus(msg, kind) {

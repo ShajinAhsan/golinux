@@ -15,6 +15,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 OUT="$ROOT/.deploy-pages"
 SITE_URL="https://golinux.app"
+TERMINAL_URL="https://terminal.golinux.app"
 ASSET_ORIGIN="https://assets.golinux.app"
 EXPECTED_ASSET_ORIGIN="https://assets.golinux.app"
 
@@ -51,17 +52,19 @@ BUILD_ID="$(node -e 'process.stdout.write(require(process.argv[1]).buildId)' \
 
 SW_SHA="$(shasum -a 256 "$OUT/sw.js" | cut -d' ' -f1)"
 INDEX_SHA="$(shasum -a 256 "$OUT/index.html" | cut -d' ' -f1)"
+TERMINAL_SHA="$(shasum -a 256 "$OUT/terminal.html" | cut -d' ' -f1)"
 FILE_COUNT="$(find "$OUT" -type f | wc -l | tr -d ' ')"
 TOTAL_BYTES="$(find "$OUT" -type f -exec stat -f%z {} + | awk '{s+=$1} END {print s+0}')"
 TOTAL_MB="$(awk -v b="$TOTAL_BYTES" 'BEGIN {printf "%.2f", b/1048576}')"
 
 echo
 echo "== Build summary =="
-echo "  build id   : $BUILD_ID"
-echo "  sw.js      : sha256 $SW_SHA"
-echo "  index.html : sha256 $INDEX_SHA"
-echo "  files      : $FILE_COUNT"
-echo "  size       : $TOTAL_MB MB"
+echo "  build id      : $BUILD_ID"
+echo "  sw.js         : sha256 $SW_SHA"
+echo "  index.html    : sha256 $INDEX_SHA"
+echo "  terminal.html : sha256 $TERMINAL_SHA"
+echo "  files         : $FILE_COUNT"
+echo "  size          : $TOTAL_MB MB"
 
 # ---------------------------------------------------------------------------
 # 2. Wrangler auth. Never attempt to log in: that is the user's action.
@@ -136,9 +139,22 @@ cb() { CB_SEQ=$((CB_SEQ + 1)); printf '%s-%s-%s' "$(date +%s)" "$$" "$CB_SEQ"; }
 
 FAILED=0
 
+check_terminal_sha() {
+  local tmp; tmp="$(mktemp)"
+  local code
+  code="$(curl -sSL -m 20 -o "$tmp" -w '%{http_code}' "$TERMINAL_URL/?cb=$(cb)")" || { rm -f "$tmp"; return 1; }
+  local live; live="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
+  local bytes; bytes="$(wc -c < "$tmp" | tr -d ' ')"
+  rm -f "$tmp"
+  if [ "$code" != "200" ] || [ "$live" != "$TERMINAL_SHA" ]; then
+    echo "  got HTTP $code ($bytes bytes, sha256 $live; expected $TERMINAL_SHA)" >&2
+    return 1
+  fi
+}
+
 check_sw_sha() {
   local tmp; tmp="$(mktemp)"
-  fetch "$SITE_URL/sw.js?cb=$(cb)" "$tmp" || { rm -f "$tmp"; return 1; }
+  fetch "$TERMINAL_URL/sw.js?cb=$(cb)" "$tmp" || { rm -f "$tmp"; return 1; }
   local live; live="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
   rm -f "$tmp"
   [ "$live" = "$SW_SHA" ]
@@ -192,10 +208,10 @@ check_sw_cache_control() {
 check_tools_json() {
   local url="$ASSET_ORIGIN/packs/$BUILD_ID/tools.json?cb=$(cb)"
   local code cors
-  code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -H "Origin: $SITE_URL" "$url")"
-  cors="$(curl -sSI -m 20 -H "Origin: $SITE_URL" "$url" \
+  code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -H "Origin: $TERMINAL_URL" "$url")"
+  cors="$(curl -sSI -m 20 -H "Origin: $TERMINAL_URL" "$url" \
     | tr -d '\r' | awk -F': ' 'tolower($1)=="access-control-allow-origin" {print $2}')"
-  [ "$code" = "200" ] && [ "$cors" = "$SITE_URL" ]
+  [ "$code" = "200" ] && [ "$cors" = "$TERMINAL_URL" ]
 }
 
 check_one_chunk() {
@@ -205,31 +221,32 @@ check_one_chunk() {
   [ -n "$chunk" ] || return 1
   local url="$ASSET_ORIGIN/images/debian-chunks/$BUILD_ID/$chunk?cb=$(cb)"
   local code cors
-  code="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -H "Origin: $SITE_URL" "$url")"
-  cors="$(curl -sSI -m 30 -H "Origin: $SITE_URL" "$url" \
+  code="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -H "Origin: $TERMINAL_URL" "$url")"
+  cors="$(curl -sSI -m 30 -H "Origin: $TERMINAL_URL" "$url" \
     | tr -d '\r' | awk -F': ' 'tolower($1)=="access-control-allow-origin" {print $2}')"
-  [ "$code" = "200" ] && [ "$cors" = "$SITE_URL" ]
+  [ "$code" = "200" ] && [ "$cors" = "$TERMINAL_URL" ]
 }
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo
-  echo "DRY RUN: would now verify $SITE_URL against this build."
+  echo "DRY RUN: would now verify $SITE_URL and $TERMINAL_URL against this build."
   echo "DRY RUN: nothing was deployed and nothing was verified."
   exit 0
 fi
 
 echo
 echo "== Verifying the live site =="
+retry "golinux.app landing index.html sha256 matches local build" 6 check_index_sha || FAILED=1
+retry "terminal.golinux.app terminal.html sha256 matches local build" 6 check_terminal_sha || FAILED=1
 retry "sw.js sha256 matches the local build" 6 check_sw_sha || FAILED=1
-retry "index.html sha256 matches the local build" 6 check_index_sha || FAILED=1
 retry "packs-config.js has GL_ASSET_ORIGIN $EXPECTED_ASSET_ORIGIN and GL_BUILD_ID $BUILD_ID" 6 check_asset_origin_and_build_id || FAILED=1
 retry "chunks-precache.json returns 200" 6 check_precache_200 || FAILED=1
 retry "sw.js Cache-Control is no-cache and not concatenated" 6 check_sw_cache_control || FAILED=1
-retry "packs/$BUILD_ID/tools.json returns 200 with CORS for $SITE_URL" 6 check_tools_json || FAILED=1
-retry "a real chunk on the asset origin returns 200 with CORS" 6 check_one_chunk || FAILED=1
+retry "packs/$BUILD_ID/tools.json returns 200 with CORS for $TERMINAL_URL" 6 check_tools_json || FAILED=1
+retry "a real chunk on the asset origin returns 200 with CORS for $TERMINAL_URL" 6 check_one_chunk || FAILED=1
 
 echo
 if [ "$FAILED" -ne 0 ]; then
   die "deployed, but live verification failed. Check the failing item above."
 fi
-echo "Deployed build $BUILD_ID and verified $SITE_URL."
+echo "Deployed build $BUILD_ID and verified $SITE_URL and $TERMINAL_URL."

@@ -171,7 +171,31 @@ async function geometry(cdp) {
     await cdp.send("Runtime.enable");
     await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
 
+    /* ---- Landing page responsiveness (index.html at "/") ---- */
+    console.log("\n== landing page responsive layout ==");
     await cdp.send("Page.navigate", { url: origin + "/" });
+    await sleep(500);
+    for (const vp of [
+      { name: "landing desktop 1440x900", w: 1440, h: 900 },
+      { name: "landing phone 390x844", w: 390, h: 844 },
+      { name: "landing small phone 320x568", w: 320, h: 568 },
+    ]) {
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.w < 800,
+      });
+      await sleep(300);
+      const lg = JSON.parse((await cdp.send("Runtime.evaluate", {
+        expression: `JSON.stringify({
+          scrollW: document.documentElement.scrollWidth,
+          clientW: document.documentElement.clientWidth,
+        })`,
+        returnByValue: true,
+      })).result.value);
+      check(lg.scrollW <= lg.clientW + 1, `${vp.name}: no horizontal overflow (${lg.scrollW} <= ${lg.clientW})`);
+    }
+
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await cdp.send("Page.navigate", { url: origin + "/terminal.html" });
     // Wait until xterm instance is created by v86
     for (let i = 0; i < 300; i++) {
       const r = await cdp.send("Runtime.evaluate", {

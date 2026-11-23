@@ -9,10 +9,36 @@
 export const MIN_COLS = 20;
 export const MIN_ROWS = 5;
 
+/** Curated vibrant dark ANSI palette (zero extra runtime CPU/RAM overhead). */
+export const TERMINAL_THEME = Object.freeze({
+  background: "#080b11",
+  foreground: "#e2e8f0",
+  cursor: "#34d399",
+  cursorAccent: "#080b11",
+  selectionBackground: "rgba(56, 189, 248, 0.26)",
+  black: "#1e293b",
+  red: "#f87171",
+  green: "#34d399",
+  yellow: "#fbbf24",
+  blue: "#60a5fa",
+  magenta: "#c084fc",
+  cyan: "#22d3ee",
+  white: "#e2e8f0",
+  brightBlack: "#64748b",
+  brightRed: "#fca5a5",
+  brightGreen: "#6ee7b7",
+  brightYellow: "#fde68a",
+  brightBlue: "#93c5fd",
+  brightMagenta: "#d8b4fe",
+  brightCyan: "#67e8f9",
+  brightWhite: "#f8fafc",
+});
+
 let getEmulator = () => window.emulator;
 let appliedCols = 0;
 let appliedRows = 0;
 let resizeScheduled = false;
+let themedTerm = null;
 
 export function setEmulatorGetter(fn) {
   getEmulator = fn;
@@ -78,9 +104,17 @@ export function desiredGrid() {
   return computeGrid(el.clientWidth - padX, el.clientHeight - padY, cell.w, cell.h);
 }
 
-/** Pick comfortable terminal font size for phone vs desktop. */
-function syncFontSize(term) {
+/** Apply vibrant theme & responsive font size for phone vs desktop. */
+function syncTerminalStyle(term) {
   if (!term || !term.options) return;
+  if (themedTerm !== term) {
+    themedTerm = term;
+    term.options.theme = TERMINAL_THEME;
+    term.options.fontFamily = 'ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace';
+    term.options.lineHeight = 1.26;
+    term.options.cursorBlink = true;
+    term.options.cursorStyle = "bar";
+  }
   const want = window.innerWidth <= 480 ? 12 : 14;
   if (term.options.fontSize !== want) {
     term.options.fontSize = want;
@@ -126,7 +160,7 @@ export function applyGrid(cols, rows, force) {
 export function fitTerminal(force) {
   const term = currentTerminal();
   if (!term) return;
-  syncFontSize(term);
+  syncTerminalStyle(term);
   const g = desiredGrid();
   if (!g) return;
   applyGrid(g.cols, g.rows, !!force);

@@ -76,10 +76,12 @@ esac
 rm -rf "$OUT"
 mkdir -p "$OUT/images" "$OUT/assets/xterm" "$OUT/assets/bios" "$OUT/assets/v86" "$OUT/icons"
 
-cp "$ROOT"/index.html "$ROOT"/about.html "$ROOT"/manifest.json "$OUT"/
-if [ -f "$ROOT/styles.css" ]; then
-  cp "$ROOT/styles.css" "$OUT/"
-fi
+cp "$ROOT"/index.html "$ROOT"/terminal.html "$ROOT"/about.html "$ROOT"/manifest.json "$OUT"/
+for css in styles.css landing.css; do
+  if [ -f "$ROOT/$css" ]; then
+    cp "$ROOT/$css" "$OUT/"
+  fi
+done
 if [ -d "$ROOT/js" ]; then
   mkdir -p "$OUT/js"
   cp "$ROOT"/js/*.js "$OUT/js/"

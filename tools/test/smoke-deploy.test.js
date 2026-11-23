@@ -347,9 +347,25 @@ async function launchChrome(profileDir, port) {
     chrome = launched.chrome;
     const cdp = launched.cdp;
 
-    /* --- 1. First load + INV-1 boot spy --- */
-    console.log("\n== first load + INV-1 stdin spy ==");
+    /* --- 0. Landing page sanity check (index.html at "/") --- */
+    console.log("\n== landing page check ==");
     await cdp.send("Page.navigate", { url: appOrigin + "/" });
+    await sleep(600);
+    const landingInfo = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `JSON.stringify({
+        title: document.title,
+        ctaCount: document.querySelectorAll("[data-launch-url]").length,
+        hasHow: !!document.getElementById("how-it-works"),
+        hasDiagram: !!document.querySelector(".arch-svg"),
+      })`,
+      returnByValue: true,
+    })).result.value);
+    check(landingInfo.ctaCount >= 3 && landingInfo.hasHow && landingInfo.hasDiagram,
+      `landing page loads cleanly (${landingInfo.ctaCount} launch CTAs, animated architecture diagram)`);
+
+    /* --- 1. First load of terminal.html + INV-1 boot spy --- */
+    console.log("\n== first load + INV-1 stdin spy ==");
+    await cdp.send("Page.navigate", { url: appOrigin + "/terminal.html" });
     await waitScreen(cdp, /root@golinux:~#/, 60000, "shell prompt");
     await sleep(1500);
 
@@ -406,6 +422,43 @@ async function launchChrome(profileDir, port) {
     );
     check(/T=xterm-256color/.test(termOut) && /SMCUP_OK/.test(termOut),
       "native TERM=xterm-256color with alternate screen (without serial0_send)");
+
+    // Verify vibrant ls colors (directories colored distinctly from regular files via LS_COLORS + alias ls)
+    await runCmd(
+      cdp,
+      "mkdir -p /root/vdir && touch /root/vfile && ls -1 /root && echo LS_COLOR_DONE",
+      /LS_COLOR_DONE[\s\S]*LS_COLOR_DONE/,
+      15000,
+      "colored ls output"
+    );
+    const lsColors = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const t = window.emulator.virtio_console_adapter.term;
+        const b = t.buffer.active;
+        let dirFg = null, fileFg = null;
+        for (let y = b.length - 1; y >= 0; y--) {
+          const line = b.getLine(y);
+          if (!line) continue;
+          const str = line.translateToString(true).trim();
+          if (str === "vdir" && !dirFg) {
+            const c = line.getCell(0);
+            if (c) dirFg = { mode: c.getFgColorMode(), col: c.getFgColor(), bold: c.isBold() };
+          }
+          if (str === "vfile" && !fileFg) {
+            const c = line.getCell(0);
+            if (c) fileFg = { mode: c.getFgColorMode(), col: c.getFgColor(), bold: c.isBold() };
+          }
+          if (dirFg && fileFg) break;
+        }
+        return JSON.stringify({ dirFg, fileFg });
+      })()`,
+      returnByValue: true,
+    })).result.value);
+    check(
+      lsColors.dirFg && lsColors.fileFg &&
+      (lsColors.dirFg.col !== lsColors.fileFg.col || lsColors.dirFg.mode !== lsColors.fileFg.mode || lsColors.dirFg.bold !== lsColors.fileFg.bold),
+      `ls colors directories distinctly from files (dir=${JSON.stringify(lsColors.dirFg)}, file=${JSON.stringify(lsColors.fileFg)})`
+    );
 
     const baseBeforeNano = (await cdp.send("Runtime.evaluate", {
       expression: `window.emulator.virtio_console_adapter.term.buffer.active.baseY`, returnByValue: true,

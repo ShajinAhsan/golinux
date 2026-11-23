@@ -19,11 +19,9 @@ import { attachKeyboardInterceptor } from "./keybar.js";
 
 const FRESH_MOTD = [
   "",
-  "  GoLinux — Debian 12 (bookworm) i386, running in your browser.",
-  "  Installed: bash, coreutils, util-linux, git, gcc/g++, make, man, nano, curl.",
-  "  Networking is OFF. Files in /root are saved locally in this browser.",
-  "  Transfer files via Upload/Download (/mnt/host is temporary; cp to /root to keep).",
-  "  Use Reset to start over. First use of a tool loads its blocks on demand.",
+  "  \x1b[1;32mGoLinux\x1b[0m \x1b[2m· Debian 12 (bookworm) i386 · local WebAssembly VM\x1b[0m",
+  "  \x1b[36mTools:\x1b[0m bash, coreutils, git, gcc/g++, make, man, nano, curl",
+  "  \x1b[2mOffline-safe (no guest network) · /root persists locally · transfer via /mnt/host\x1b[0m",
   "",
 ].join("\r\n");
 
@@ -292,7 +290,7 @@ export async function bootMachine() {
       if (userState) {
         term.write("\x1b[2m[session restored]\x1b[0m\r\n");
       } else {
-        term.write(FRESH_MOTD + "\r\nroot@golinux:~# ");
+        term.write(FRESH_MOTD + "\r\n\x1b[1;32mroot@golinux\x1b[0m:\x1b[1;34m~\x1b[0m# ");
       }
     }
 

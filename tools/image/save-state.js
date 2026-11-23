@@ -29,12 +29,33 @@ const SETUP_9P = [
   "mountpoint -q /mnt/host || mount -t 9p -o trans=virtio,version=9p2000.L host9p /mnt/host || true",
 ].join("; ");
 
-// Enable virtio_console (/dev/hvc0) with TERM=xterm-256color so the browser
-// gets true out-of-band SIGWINCH resizing (virtio-console0-resize) with ZERO
-// bytes ever injected into guest stdin.
+// Enable virtio_console (/dev/hvc0) with TERM=xterm-256color and vibrant
+// LS_COLORS / colored ls & grep / colored PS1 (zero runtime overhead).
+const BASH_PROFILE_CMD =
+  "printf '%s\\n' " +
+  "'export HOME=/root' " +
+  "'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' " +
+  "'export LANG=C.UTF-8' " +
+  "'[ -f /root/.bashrc ] && . /root/.bashrc' " +
+  "'cd /root 2>/dev/null || cd /' " +
+  "> /root/.bash_profile";
+
+const BASHRC_CMD =
+  "printf '%s\\n' " +
+  "'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' " +
+  "'export CLICOLOR=1' " +
+  "'export LS_COLORS=\"di=1;34:ln=1;36:ex=1;32:so=1;35:pi=33:bd=1;33:cd=1;33:*.tar=1;31:*.tgz=1;31:*.gz=1;31:*.zip=1;31:*.zst=1;31:*.c=38;5;114:*.h=38;5;110:*.cpp=38;5;114:*.py=38;5;221:*.sh=1;32:*.md=38;5;183:*.json=38;5;215\"' " +
+  "'alias ls=\"ls --color=auto\"' " +
+  "'alias ll=\"ls -alF --color=auto\"' " +
+  "'alias la=\"ls -A --color=auto\"' " +
+  "'alias grep=\"grep --color=auto\"' " +
+  "'PS1=\"\\[\\e[1;32m\\]\\u@\\h\\[\\e[0m\\]:\\[\\e[1;34m\\]\\w\\[\\e[0m\\]\\\\$ \"' " +
+  "> /root/.bashrc";
+
 const SETUP_HVC0 = [
   "modprobe virtio_console",
-  "sed -i '/export TERM=vt102/d' /root/.bashrc /root/.bash_profile",
+  BASH_PROFILE_CMD,
+  BASHRC_CMD,
   "printf '%s\\n' '# Ensure alternate-screen capable TERM' 'if [ -z \"$TERM\" ] || [ \"$TERM\" = \"vt102\" ] || [ \"$TERM\" = \"vt100\" ] || [ \"$TERM\" = \"dumb\" ]; then export TERM=xterm-256color; fi' > /etc/profile.d/term.sh",
   "chmod 644 /etc/profile.d/term.sh",
   "sed -i 's/vt102/xterm-256color/g' /etc/inittab",
@@ -104,13 +125,18 @@ emulator.add_listener("virtio-console0-output-bytes", (bytes) => {
   const s = Buffer.from(bytes).toString("utf8");
   hvc.text += s;
   if (phase === 1 && /root@golinux:~#\s*$/.test(hvc.text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, ""))) {
+    if (!hvc.text.includes("\x1b[1;32mroot@golinux")) {
+      console.error("[snapshot] ERROR: hvc0 prompt is missing ANSI colors: " + JSON.stringify(hvc.text.slice(-120)));
+      emulator.stop(); process.exit(1);
+    }
     phase = 2;
-    console.error("\n[snapshot] hvc0 login shell ready; running RAM prep + verification");
+    console.error("\n[snapshot] hvc0 login shell ready (colored prompt ok); running RAM prep + verification");
     const verify = [
       "grep -q 'GoLinux' /etc/motd || echo 'MOTD_WRITE_FAILED'",
       "mountpoint -q /mnt/host || echo 'MOUNT_FAILED'",
       "HVC_PID=$(ps -t hvc0 -o pid=,comm= | awk '$2==\"bash\"{print $1; exit}')",
       "[ -n \"$HVC_PID\" ] && tr '\\0' '\\n' < /proc/$HVC_PID/environ | grep -qx 'TERM=xterm-256color' || echo 'HVC_TERM_FAILED'",
+      "grep -q 'LS_COLORS=' /root/.bashrc && grep -q 'ls --color=auto' /root/.bashrc || echo 'HVC_COLORS_FAILED'",
       "echo PREP_VERIFIED",
     ].join("; ");
     emulator.serial0_send(`${PREP}; ${verify}\n`);
@@ -141,6 +167,10 @@ emulator.add_listener("serial0-output-byte", (byte) => {
   }
   if (phase === 2 && appeared("HVC_TERM_FAILED")) {
     console.error("[snapshot] ERROR: hvc0 bash does not have TERM=xterm-256color");
+    emulator.stop(); process.exit(1);
+  }
+  if (phase === 2 && appeared("HVC_COLORS_FAILED")) {
+    console.error("[snapshot] ERROR: hvc0 bash does not have LS_COLORS");
     emulator.stop(); process.exit(1);
   }
 
