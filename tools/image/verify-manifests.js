@@ -155,18 +155,22 @@ if (!fs.existsSync(configPath)) {
     } else if (/[^0-9a-f]/.test(b[1])) {
       fail(`GL_BUILD_ID is not lowercase hex: '${b[1]}'`);
     } else {
-      // It must match the artifacts it names.
-      try {
-        const recorded = JSON.parse(fs.readFileSync(
-          path.join(ROOT, "images", "build-id.json"), "utf8")).buildId;
-        if (recorded !== b[1]) {
-          fail(`GL_BUILD_ID (${b[1]}) does not match images/build-id.json ` +
-            `(${recorded}); chunks would 404. Re-stamp the build id.`);
-        } else {
-          notes.push(`deploy build id ${b[1]} matches artifacts`);
+      // It must match the artifacts it names (unless explicit rollback override).
+      if (!process.argv.includes("--allow-override-id")) {
+        try {
+          const recorded = JSON.parse(fs.readFileSync(
+            path.join(ROOT, "images", "build-id.json"), "utf8")).buildId;
+          if (recorded !== b[1]) {
+            fail(`GL_BUILD_ID (${b[1]}) does not match images/build-id.json ` +
+              `(${recorded}); chunks would 404. Re-stamp the build id.`);
+          } else {
+            notes.push(`deploy build id ${b[1]} matches artifacts`);
+          }
+        } catch (e) {
+          fail("images/build-id.json is unreadable; cannot verify GL_BUILD_ID");
         }
-      } catch (e) {
-        fail("images/build-id.json is unreadable; cannot verify GL_BUILD_ID");
+      } else {
+        notes.push(`deploy build id ${b[1]} (explicit override)`);
       }
     }
 
@@ -187,14 +191,75 @@ if (!fs.existsSync(configPath)) {
 }
 
 // Catch a cache name hardcoded somewhere else, which would silently drift.
-for (const f of ["index.html", "sw.js"]) {
+for (const f of ["index.html", "sw.js", "persist.js", "packs.js"]) {
   const p = path.join(ROOT, f);
   if (!fs.existsSync(p)) continue;
   const src = fs.readFileSync(p, "utf8");
-  // Guard against a cache name being hardcoded instead of built from GL_VERSION.
   if (/golinux-(shell|data|pack)-v\d/.test(src)) {
     fail(`${f} hardcodes a cache name; use GL_SHELL_CACHE / GL_DATA_CACHE / ` +
       `GL_PACK_CACHE from packs-config.js`);
+  }
+}
+
+// chunks-precache.json must match images/debian-chunks/manifest.json["real"].
+const PRECACHE = path.join(ROOT, "chunks-precache.json");
+const CHUNK_MANIFEST = path.join(CHUNKS, "manifest.json");
+if (!fs.existsSync(PRECACHE)) {
+  fail("chunks-precache.json is missing — run: node tools/image/build-chunk-manifest.js");
+} else if (fs.existsSync(CHUNK_MANIFEST)) {
+  const pre = JSON.parse(fs.readFileSync(PRECACHE, "utf8"));
+  const man = JSON.parse(fs.readFileSync(CHUNK_MANIFEST, "utf8")).real || [];
+  if (pre.length !== man.length || pre.some((v, i) => v !== man[i])) {
+    fail("chunks-precache.json does not match images/debian-chunks/manifest.json — " +
+      "run: node tools/image/build-chunk-manifest.js");
+  } else {
+    notes.push(`chunks-precache.json matches manifest (${pre.length} chunks)`);
+  }
+}
+
+// public/_headers must detach Cache-Control with "! Cache-Control" before any narrow override.
+const HEADERS = path.join(ROOT, "public", "_headers");
+if (fs.existsSync(HEADERS)) {
+  const lines = fs.readFileSync(HEADERS, "utf8").split(/\r?\n/);
+  let currentPath = null;
+  let detached = false;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (!/^\s/.test(raw)) {
+      currentPath = trimmed;
+      detached = false;
+      continue;
+    }
+    if (/^!\s*cache-control\b/i.test(trimmed)) detached = true;
+    else if (/^cache-control\s*:/i.test(trimmed) && currentPath && currentPath !== "/*" && !detached) {
+      fail(`public/_headers:${i + 1} sets Cache-Control under ${currentPath} without '! Cache-Control' detach`);
+    }
+  }
+}
+
+// tools/image/install.sh must not regress TERM=vt102.
+const INSTALL_SH = path.join(ROOT, "tools", "image", "install.sh");
+if (fs.existsSync(INSTALL_SH)) {
+  const src = fs.readFileSync(INSTALL_SH, "utf8");
+  if (/export TERM=vt102/.test(src)) {
+    fail("tools/image/install.sh still exports TERM=vt102 (overrides xterm-256color)");
+  }
+}
+
+// No runtime file outside keybar/tools may call serial0_send (INV-1).
+const RUNTIME_CHECK = [
+  "index.html", "sw.js", "persist.js", "persist-9p.js", "packs.js",
+  "js/main.js", "js/status.js", "js/boot.js", "js/terminal.js",
+  "js/persist-ui.js", "js/packs-ui.js", "js/transfer.js", "js/tool-progress.js",
+];
+for (const rel of RUNTIME_CHECK) {
+  const p = path.join(ROOT, rel);
+  if (!fs.existsSync(p)) continue;
+  const src = fs.readFileSync(p, "utf8");
+  if (/\bserial0_send\s*\(/.test(src)) {
+    fail(`${rel} calls serial0_send() — violates INV-1 (no synthetic guest stdin)`);
   }
 }
 

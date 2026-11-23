@@ -50,16 +50,18 @@ BUILD_ID="$(node -e 'process.stdout.write(require(process.argv[1]).buildId)' \
 [ -n "$BUILD_ID" ] || die "build id is empty"
 
 SW_SHA="$(shasum -a 256 "$OUT/sw.js" | cut -d' ' -f1)"
+INDEX_SHA="$(shasum -a 256 "$OUT/index.html" | cut -d' ' -f1)"
 FILE_COUNT="$(find "$OUT" -type f | wc -l | tr -d ' ')"
 TOTAL_BYTES="$(find "$OUT" -type f -exec stat -f%z {} + | awk '{s+=$1} END {print s+0}')"
 TOTAL_MB="$(awk -v b="$TOTAL_BYTES" 'BEGIN {printf "%.2f", b/1048576}')"
 
 echo
 echo "== Build summary =="
-echo "  build id : $BUILD_ID"
-echo "  sw.js    : sha256 $SW_SHA"
-echo "  files    : $FILE_COUNT"
-echo "  size     : $TOTAL_MB MB"
+echo "  build id   : $BUILD_ID"
+echo "  sw.js      : sha256 $SW_SHA"
+echo "  index.html : sha256 $INDEX_SHA"
+echo "  files      : $FILE_COUNT"
+echo "  size       : $TOTAL_MB MB"
 
 # ---------------------------------------------------------------------------
 # 2. Wrangler auth. Never attempt to log in: that is the user's action.
@@ -129,21 +131,33 @@ retry() {
   return 1
 }
 
+CB_SEQ=0
+cb() { CB_SEQ=$((CB_SEQ + 1)); printf '%s-%s-%s' "$(date +%s)" "$$" "$CB_SEQ"; }
+
 FAILED=0
 
 check_sw_sha() {
   local tmp; tmp="$(mktemp)"
-  fetch "$SITE_URL/sw.js?cb=$(date +%s%N)" "$tmp" || { rm -f "$tmp"; return 1; }
+  fetch "$SITE_URL/sw.js?cb=$(cb)" "$tmp" || { rm -f "$tmp"; return 1; }
   local live; live="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
   rm -f "$tmp"
   [ "$live" = "$SW_SHA" ]
 }
 
-check_asset_origin() {
+check_index_sha() {
   local tmp; tmp="$(mktemp)"
-  fetch "$SITE_URL/packs-config.js?cb=$(date +%s%N)" "$tmp" || { rm -f "$tmp"; return 1; }
+  fetch "$SITE_URL/index.html?cb=$(cb)" "$tmp" || { rm -f "$tmp"; return 1; }
+  local live; live="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
+  rm -f "$tmp"
+  [ "$live" = "$INDEX_SHA" ]
+}
+
+check_asset_origin_and_build_id() {
+  local tmp; tmp="$(mktemp)"
+  fetch "$SITE_URL/packs-config.js?cb=$(cb)" "$tmp" || { rm -f "$tmp"; return 1; }
   local ok=0
-  if grep -qE "^const GL_ASSET_ORIGIN = \"${EXPECTED_ASSET_ORIGIN}\";" "$tmp"; then
+  if grep -qE "^const GL_ASSET_ORIGIN = \"${EXPECTED_ASSET_ORIGIN}\";" "$tmp" && \
+     grep -qE "^const GL_BUILD_ID = \"${BUILD_ID}\";" "$tmp"; then
     ok=1
   fi
   rm -f "$tmp"
@@ -153,24 +167,24 @@ check_asset_origin() {
 check_precache_200() {
   local code
   code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' \
-    "$SITE_URL/chunks-precache.json?cb=$(date +%s%N)")"
+    "$SITE_URL/chunks-precache.json?cb=$(cb)")"
   [ "$code" = "200" ]
 }
 
 check_sw_cache_control() {
   local hdr
-  hdr="$(curl -sSI -m 20 "$SITE_URL/sw.js?cb=$(date +%s%N)" \
+  hdr="$(curl -sSI -m 20 "$SITE_URL/sw.js?cb=$(cb)" \
     | tr -d '\r' | awk -F': ' 'tolower($1)=="cache-control" {print tolower($2)}')"
-  # Accept no-cache, or a max-age of 0 (with any must-revalidate qualifier).
+  # Must contain no-cache or max-age=0 AND must NOT contain concatenated "public, max-age=0" + "no-store".
   case "$hdr" in
-    *no-cache*) return 0 ;;
-    *max-age=0*) return 0 ;;
+    *public*no-store*) echo "  conflicting concatenated cache-control: $hdr" >&2; return 1 ;;
+    *no-cache*|*max-age=0*) return 0 ;;
     *) echo "  cache-control was: ${hdr:-<none>}" >&2; return 1 ;;
   esac
 }
 
 check_tools_json() {
-  local url="$ASSET_ORIGIN/packs/$BUILD_ID/tools.json?cb=$(date +%s%N)"
+  local url="$ASSET_ORIGIN/packs/$BUILD_ID/tools.json?cb=$(cb)"
   local code cors
   code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -H "Origin: $SITE_URL" "$url")"
   cors="$(curl -sSI -m 20 -H "Origin: $SITE_URL" "$url" \
@@ -183,7 +197,7 @@ check_one_chunk() {
   chunk="$(node -e 'process.stdout.write(require(process.argv[1])[0])' \
     "$ROOT/chunks-precache.json")"
   [ -n "$chunk" ] || return 1
-  local url="$ASSET_ORIGIN/images/debian-chunks/$BUILD_ID/$chunk?cb=$(date +%s%N)"
+  local url="$ASSET_ORIGIN/images/debian-chunks/$BUILD_ID/$chunk?cb=$(cb)"
   local code cors
   code="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -H "Origin: $SITE_URL" "$url")"
   cors="$(curl -sSI -m 30 -H "Origin: $SITE_URL" "$url" \
@@ -201,9 +215,10 @@ fi
 echo
 echo "== Verifying the live site =="
 retry "sw.js sha256 matches the local build" 6 check_sw_sha || FAILED=1
-retry "packs-config.js has GL_ASSET_ORIGIN $EXPECTED_ASSET_ORIGIN" 6 check_asset_origin || FAILED=1
+retry "index.html sha256 matches the local build" 6 check_index_sha || FAILED=1
+retry "packs-config.js has GL_ASSET_ORIGIN $EXPECTED_ASSET_ORIGIN and GL_BUILD_ID $BUILD_ID" 6 check_asset_origin_and_build_id || FAILED=1
 retry "chunks-precache.json returns 200" 6 check_precache_200 || FAILED=1
-retry "sw.js Cache-Control is no-cache / max-age=0" 6 check_sw_cache_control || FAILED=1
+retry "sw.js Cache-Control is no-cache and not concatenated" 6 check_sw_cache_control || FAILED=1
 retry "packs/$BUILD_ID/tools.json returns 200 with CORS for $SITE_URL" 6 check_tools_json || FAILED=1
 retry "a real chunk on the asset origin returns 200 with CORS" 6 check_one_chunk || FAILED=1
 

@@ -1,31 +1,24 @@
 #!/usr/bin/env node
 /**
- * Production-like smoke test. REQUIRED before any deploy.
+ * Production-like two-origin smoke + invariant test. REQUIRED before deploy.
  *
- * Serves two origins exactly as production does:
- *   app origin   (temp copy of .deploy-pages, asset origin pointed at B)
- *   asset origin (a mirror of what upload-r2.sh uploads: real chunks under
- *                 images/debian-chunks/<buildId>/, 404 for zeroed chunks)
- *
- * Then drives a FRESH headless Chrome profile through a real session:
- * first load -> shell -> ls -> gcc --version -> compile+run C -> write a file in
- * /root -> save -> reload -> assert the file survived.
- *
- * It uses NO localhost override (?assets=) and NO localStorage override: the
- * only asset origin is the staged GL_ASSET_ORIGIN, rewritten in a temp copy.
- * .deploy-pages itself is never modified.
- *
- * Network assertions:
- *   - every chunk request goes to the ASSET origin, with the build id in the
- *     path, and never to the app origin
- *   - every request for a REAL chunk returns 200
- *   - a 404 on the asset origin is only ever a known-zeroed chunk (which the
- *     service worker answers with the empty template)
- *   - no fatal "out of date" overlay appears
- *
- * Exits non-zero on any failure.
- *
- * Usage: node tools/test/smoke-deploy.test.js [--keep] [--pages DIR]
+ * Verifies:
+ *   1. Two-origin split (app origin + local R2 mirror with versioned paths & 404 for zeroed chunks)
+ *   2. INV-1 SPY: ZERO non-user bytes reach guest stdin across boot, idle, 3 resizes, save, reload
+ *   3. Cold gcc compile:
+ *        - floating #diskToast appears without shifting terminal height
+ *        - COMPILE_OK output stays on screen AFTER gcc finishes AND AFTER #diskToast hides
+ *          (proving nothing clears/erases command output!)
+ *   4. Native TERM=xterm-256color + nano clean alternate screen (zero scrollback residue)
+ *   5. Native virtio-console out-of-band resize:
+ *        - stty size matches browser grid after viewport resize
+ *        - half-typed command survives viewport resize intact and runs on Enter
+ *        - zero stty / Ctrl-L text ever injected
+ *   6. Persistence across reload + Reset button clears saved session (BUG-15)
+ *   7. Restart button cleanly reboots into working shell without hanging SeaBIOS (BUG-22)
+ *   8. Fresh-vs-Upgrade: mismatched buildId in OPFS is rejected BOTH online and offline (BUG-05)
+ *   9. Offline real-chunk miss shows #offlineBanner WITHOUT "out of date" fatal stop (BUG-09)
+ *  10. Network assertions: every chunk went to asset origin with buildId, none to app origin
  */
 "use strict";
 
@@ -41,41 +34,28 @@ const pagesArg = process.argv.indexOf("--pages");
 const PAGES_SRC = pagesArg > 0
   ? path.resolve(process.argv[pagesArg + 1])
   : path.join(ROOT, ".deploy-pages");
-
 const PROD_ASSET_ORIGIN = "https://assets.golinux.app";
 
 let failures = 0;
 function ok(msg) { console.log("ok: " + msg); }
 function bad(msg) { failures++; console.error("FAIL: " + msg); }
 function check(cond, msg) { cond ? ok(msg) : bad(msg); }
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* ---------------- static servers ---------------- */
-
 const MIME = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json",
-  ".wasm": "application/wasm",
-  ".zst": "application/zstd",
-  ".bin": "application/octet-stream",
-  ".png": "image/png",
+  ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8", ".json": "application/json",
+  ".wasm": "application/wasm", ".zst": "application/zstd",
+  ".bin": "application/octet-stream", ".png": "image/png",
 };
 
-/**
- * @param root      directory to serve
- * @param opts.assetOrigin  if set: only asset paths are served (as R2 does),
- *                          CORS headers are added, and zeroed chunks 404.
- * @param opts.realChunks   Set of real chunk names (asset mode).
- */
 function serve(root, opts = {}) {
-  // Every request that actually reaches this origin. This is the ground truth
-  // for the network assertions: unlike the CDP Network domain it also sees
-  // requests issued by the service worker, which is exactly what we must check.
   const log = opts.log || [];
   const server = http.createServer((req, res) => {
+    if (opts.offlineRef && opts.offlineRef.value) {
+      req.socket.destroy();
+      return;
+    }
     let rel = decodeURIComponent(req.url.split("?")[0]).replace(/^\/+/, "");
     if (rel === "") rel = "index.html";
     log.push({ method: req.method, path: "/" + rel, status: null, t: Date.now() });
@@ -83,56 +63,35 @@ function serve(root, opts = {}) {
     if (opts.assetOrigin) {
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, HEAD");
-      res.setHeader("Access-Control-Allow-Headers",
-        "Range, If-None-Match, If-Modified-Since");
-      res.setHeader("Access-Control-Expose-Headers",
-        "Content-Length, Content-Range, ETag");
-      // The bucket only holds chunks and packs.
+      res.setHeader("Access-Control-Allow-Headers", "Range, If-None-Match, If-Modified-Since");
+      res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range, ETag");
       if (!/^(images\/debian-chunks\/|packs\/)/.test(rel)) {
         log[log.length - 1].status = 404;
-        res.writeHead(404).end("not in bucket");
-        return;
+        return res.writeHead(404).end("not in bucket");
       }
-      // Zeroed chunks are never uploaded: 404, as R2 does.
       const m = rel.match(/\/chunk-(\d+)-(\d+)\.zst$/);
-      if (m && opts.realChunks &&
-          !opts.realChunks.has(path.basename(rel))) {
+      if (m && opts.realChunks && !opts.realChunks.has(path.basename(rel))) {
         log[log.length - 1].status = 404;
-        res.writeHead(404).end("not stored");
-        return;
+        return res.writeHead(404).end("not stored");
       }
-    } else {
-      // Pages does not serve the chunk directory at all.
-      if (rel.startsWith("images/debian-chunks/")) {
-        log[log.length - 1].status = 404;
-        res.writeHead(404).end("not on Pages");
-        return;
-      }
+    } else if (rel.startsWith("images/debian-chunks/") || rel.startsWith("packs/")) {
+      log[log.length - 1].status = 404;
+      return res.writeHead(404).end("not on app origin");
     }
 
     const full = path.join(root, rel);
-    if (!full.startsWith(root) || !fs.existsSync(full) ||
-        !fs.statSync(full).isFile()) {
+    if (!full.startsWith(root) || !fs.existsSync(full) || !fs.statSync(full).isFile()) {
       log[log.length - 1].status = 404;
-      res.writeHead(404).end("not found");
-      return;
+      return res.writeHead(404).end("not found");
     }
     const body = fs.readFileSync(full);
     log[log.length - 1].status = 200;
     res.writeHead(200, {
-      "Content-Type": MIME[path.extname(full).toLowerCase()] ||
-        "application/octet-stream",
+      "Content-Type": MIME[path.extname(full).toLowerCase()] || "application/octet-stream",
       "Content-Length": body.length,
-      // NOTE: deliberately NOT "immutable". The SW cache is what production
-      // layers on top; for a cold-cache test the browser's own HTTP cache must
-      // not be able to answer a chunk after the SW cache is cleared.
-      "Cache-Control": opts.assetOrigin ? "public, max-age=0, must-revalidate"
-        : "no-cache",
+      "Cache-Control": opts.assetOrigin ? "public, max-age=0, must-revalidate" : "no-cache",
     });
     if (req.method === "HEAD") return res.end();
-    // Optional throttling, so the indicator test can exercise a real slow link.
-    // Without it a local server answers each chunk in well under 500 ms and the
-    // indicator correctly never appears.
     const t = opts.throttle;
     if (!t || !/\/debian-chunks\//.test(rel)) return res.end(body);
     setTimeout(() => {
@@ -149,142 +108,103 @@ function serve(root, opts = {}) {
     }, t.latencyMs || 0);
   });
   return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => {
-      resolve({ server, port: server.address().port, log });
-    });
+    server.listen(0, "127.0.0.1", () => resolve({ server, port: server.address().port, log }));
   });
 }
 
-/* ---------------- R2 mirror ---------------- */
-
-/**
- * Mirror exactly what upload-r2.sh syncs: real chunks at
- * images/debian-chunks/<buildId>/, the empty template, and packs/<buildId>/.
- * Hardlinked so it is cheap.
- */
 function stageR2Mirror(dest, buildId) {
-  const manifest = JSON.parse(
-    fs.readFileSync(path.join(ROOT, "images/debian-chunks/manifest.json"), "utf8"));
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "images/debian-chunks/manifest.json"), "utf8"));
   const srcDir = path.join(ROOT, "images/debian-chunks");
   const chunkDst = path.join(dest, "images", "debian-chunks", buildId);
   fs.mkdirSync(chunkDst, { recursive: true });
-
-  let n = 0;
-  for (const name of manifest.real) {
-    fs.linkSync(path.join(srcDir, name), path.join(chunkDst, name));
-    n++;
-  }
-  fs.linkSync(path.join(srcDir, "empty-chunk.zst"),
-    path.join(chunkDst, "empty-chunk.zst"));
-
+  for (const name of manifest.real) fs.linkSync(path.join(srcDir, name), path.join(chunkDst, name));
+  fs.linkSync(path.join(srcDir, "empty-chunk.zst"), path.join(chunkDst, "empty-chunk.zst"));
   const packDst = path.join(dest, "packs", buildId);
   fs.mkdirSync(packDst, { recursive: true });
-  let p = 0;
   for (const f of fs.readdirSync(path.join(ROOT, "packs"))) {
-    if (f.endsWith(".json")) {
-      fs.linkSync(path.join(ROOT, "packs", f), path.join(packDst, f));
-      p++;
-    }
+    if (f.endsWith(".json")) fs.linkSync(path.join(ROOT, "packs", f), path.join(packDst, f));
   }
-  return { chunks: n + 1, packs: p, real: new Set(manifest.real) };
+  return { chunks: manifest.real.length + 1, real: new Set(manifest.real) };
 }
-
-/* ---------------- minimal CDP client ---------------- */
 
 class CDP {
   constructor(ws) {
-    this.ws = ws;
-    this.id = 0;
-    this.pending = new Map();
-    this.handlers = [];
+    this.ws = ws; this.id = 0; this.pending = new Map();
     ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.id !== undefined) {
-        const p = this.pending.get(msg.id);
-        if (!p) return;
-        this.pending.delete(msg.id);
-        msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result);
-      } else {
-        for (const h of this.handlers) h(msg);
+      const m = JSON.parse(ev.data);
+      if (m.id !== undefined) {
+        const p = this.pending.get(m.id); if (!p) return;
+        this.pending.delete(m.id);
+        m.error ? p.reject(new Error(m.error.message)) : p.resolve(m.result);
       }
     };
   }
   send(method, params = {}) {
     const id = ++this.id;
     this.ws.send(JSON.stringify({ id, method, params }));
-    return new Promise((resolve, reject) =>
-      this.pending.set(id, { resolve, reject }));
+    return new Promise((res, rej) => this.pending.set(id, { resolve: res, reject: rej }));
   }
-  on(fn) { this.handlers.push(fn); }
 }
+const connect = (u) => new Promise((res, rej) => {
+  const ws = new WebSocket(u);
+  ws.onopen = () => res(new CDP(ws));
+  ws.onerror = () => rej(new Error("CDP ws failed"));
+});
 
-function connect(url) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
-    ws.onopen = () => resolve(new CDP(ws));
-    ws.onerror = () => reject(new Error("CDP websocket failed"));
-  });
-}
-
-async function waitForHttp(url, timeoutMs, what) {
-  const end = Date.now() + timeoutMs;
+async function waitForHttp(url, ms, what) {
+  const end = Date.now() + ms;
   while (Date.now() < end) {
-    try {
-      const r = await fetch(url);
-      if (r.ok) return await r.json().catch(() => ({}));
-    } catch (e) { /* not up yet */ }
+    try { const r = await fetch(url); if (r.ok) return await r.json().catch(() => ({})); } catch (e) {}
     await sleep(100);
   }
   throw new Error("timed out waiting for " + what);
 }
 
-/* ---------------- browser ---------------- */
-
 function chromePath() {
-  const candidates = [
+  for (const c of [
     process.env.CHROME,
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
     "/usr/bin/google-chrome",
     "/usr/bin/chromium",
-  ].filter(Boolean);
-  for (const c of candidates) if (fs.existsSync(c)) return c;
+  ].filter(Boolean)) if (fs.existsSync(c)) return c;
   throw new Error("no Chrome/Chromium found; set $CHROME");
 }
-
-/* ---------------- terminal driving (real key events) ---------------- */
 
 async function screenText(cdp) {
   const r = await cdp.send("Runtime.evaluate", {
     expression: `(() => {
-      const el = document.querySelector(".xterm-rows");
-      return el ? el.innerText : "";
+      const ad = window.emulator && (window.emulator.virtio_console_adapter || window.emulator.serial_adapter);
+      const t = ad && ad.term;
+      if (!t) return "";
+      const b = t.buffer.active;
+      const lines = [];
+      for (let y = b.viewportY; y < b.viewportY + t.rows; y++) {
+        const l = b.getLine(y);
+        if (l) lines.push(l.translateToString(true));
+      }
+      return lines.join("\\n");
     })()`,
     returnByValue: true,
   });
   return r.result.value || "";
 }
 
-async function waitScreen(cdp, re, timeoutMs, what) {
-  const end = Date.now() + timeoutMs;
+async function waitScreen(cdp, re, ms, what) {
+  const end = Date.now() + ms;
   let last = "";
   while (Date.now() < end) {
     last = await screenText(cdp);
     if (re.test(last)) return last;
-    await sleep(250);
+    await sleep(200);
   }
-  throw new Error(`timed out waiting for ${what}. Screen tail:\n` +
-    last.split("\n").slice(-8).join("\n"));
+  const nonEmpty = last.split("\n").filter((l) => l.trim().length > 0);
+  throw new Error(`timed out waiting for ${what}. Non-empty tail:\n${nonEmpty.slice(-12).join("\n")}`);
 }
 
 async function focusTerm(cdp) {
   await cdp.send("Runtime.evaluate", {
-    expression: `(() => {
-      const t = document.querySelector(".xterm-helper-textarea");
-      if (t) t.focus();
-      return !!t;
-    })()`,
-    returnByValue: true,
+    expression: `(() => { const t = document.querySelector(".xterm-helper-textarea"); if (t) t.focus(); })()`,
   });
 }
 
@@ -304,268 +224,85 @@ async function pressEnter(cdp) {
   }
 }
 
-async function run(cdp, cmd, expectRe, timeoutMs, what) {
+async function pressCtrl(cdp, ch) {
+  const code = ch.toUpperCase().charCodeAt(0) - 64;
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "char", text: String.fromCharCode(code),
+  });
+}
+
+async function runCmd(cdp, cmd, expectRe, ms, what) {
   await focusTerm(cdp);
   await typeText(cdp, cmd);
   await pressEnter(cdp);
-  return waitScreen(cdp, expectRe, timeoutMs, what || cmd);
+  return waitScreen(cdp, expectRe, ms, what || cmd);
 }
 
-/* ---------------- cold-profile compile phase ---------------- */
-
-/**
- * Load the app in a FRESH browser profile and time an indicator-visible gcc
- * compile. This mirrors the measurement harness: a new profile means a new
- * service worker, empty CacheStorage and an empty v86 block cache, which is the
- * only honest way to obtain a cold first compile.
- */
-async function runColdCompile(ctx) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "golinux-cold-"));
-  const out = { compiled: false, indicatorSeen: false, indicatorText: "",
-    toolLabelIsGcc: false, stats: {}, log: [] };
-  let chrome = null;
-  try {
-    const profile = path.join(tmp, "profile");
-    fs.mkdirSync(profile, { recursive: true });
-    const port = 9800 + Math.floor(Math.random() * 190);
-    chrome = spawn(chromePath(), [
-      "--headless=new", `--remote-debugging-port=${port}`,
-      `--user-data-dir=${profile}`, "--no-first-run",
-      "--no-default-browser-check", "--disable-extensions",
-      "--disable-dev-shm-usage", "--window-size=1280,900", "about:blank",
-    ], { stdio: "ignore" });
-
-    await waitForHttp(`http://127.0.0.1:${port}/json/version`, 20000, "Chrome");
-    const targets = await waitForHttp(`http://127.0.0.1:${port}/json/list`,
-      10000, "targets");
-    const page = (Array.isArray(targets) ? targets : []).find((t) => t.type === "page");
-    const cdp = await connect(page.webSocketDebuggerUrl);
-    await cdp.send("Page.enable");
-    await cdp.send("Runtime.enable");
-
-    await cdp.send("Page.navigate", { url: ctx.appOrigin + "/" });
-    await waitScreen(cdp, /root@golinux:~#/, 90000, "cold shell prompt");
-
-    // Arm the observer before the compile.
-    await cdp.send("Runtime.evaluate", {
-      expression: `(() => {
-        window.__ind = { seen: false, text: "" };
-        const bar = document.getElementById("diskBar");
-        new MutationObserver(() => {
-          if (bar.classList.contains("visible")) {
-            window.__ind.seen = true;
-            window.__ind.text =
-              (document.getElementById("diskLabel").textContent || "") + " " +
-              (document.getElementById("diskSub").textContent || "");
-          }
-        }).observe(bar, { attributes: true, attributeFilter: ["class"] });
-      })()`,
-    });
-
-    const before = ctx.assetLog ? ctx.assetLog.length : 0;
-    await focusTerm(cdp);
-    await typeText(cdp, "printf 'int main(){return 0;}' > /root/t.c && " +
-      "gcc /root/t.c -o /root/t && /root/t && echo COMPILE_OK");
-    const t0 = Date.now();
-    await pressEnter(cdp);
-
-    let last = "";
-    let seen = false, seenText = "";
-    const allSeen = [];
-    for (let i = 0; i < 1800; i++) {
-      const r = await cdp.send("Runtime.evaluate", {
-        expression: `JSON.stringify(window.__ind)`, returnByValue: true,
-      });
-      const v = JSON.parse(r.result.value || "{}");
-      // Keep updating: the bar may first flash a small tool (make) whose chunks
-      // overlap the compile's, then settle on the real one (gcc).
-      if (v.seen) { seen = true; seenText = v.text; allSeen.push(v.text); }
-      last = await screenText(cdp);
-      // The typed command itself contains COMPILE_OK, so its echo satisfies a
-      // single match. Require two occurrences: the echo and the real output.
-      if (last.split("COMPILE_OK").length - 1 >= 2) break;
-      await sleep(100);
-    }
-    out.compiled = last.split("COMPILE_OK").length - 1 >= 2;
-    out.indicatorSeen = seen;
-    out.indicatorText = seenText;
-    // True if gcc was ever the label during the compile.
-    out.toolLabelIsGcc = allSeen.some((t) => /gcc/i.test(t));
-    out.labels = allSeen;
-
-    const hits = ctx.assetLog ? ctx.assetLog.slice(before)
-      .filter((r) => /\/chunk-\d+-\d+\.zst$/.test(r.path)).length : 0;
-    out.stats = { ms: Date.now() - t0, chunkRequests: hits };
-
-    /* ---- tty resize: guest follows, and nothing is printed ---- */
-    {
-      const r = await cdp.send("Runtime.evaluate", {
-        expression: `(async () => {
-          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-          const t = window.emulator.serial_adapter.term;
-          const vis = () => {
-            const b = t.buffer.active; const o = [];
-            for (let y = b.viewportY; y < b.viewportY + t.rows; y++) {
-              const l = b.getLine(y); const s = l ? l.translateToString(true) : "";
-              if (s.trim()) o.push(s);
-            }
-            return o;
-          };
-          fitTerminal();                 // settle at the current size
-          await sleep(900);
-          const before = { cols: t.cols, rows: t.rows, lines: vis() };
-          applyGrid(Math.max(20, before.cols - 40), Math.max(5, before.rows - 12));
-          await sleep(1600);
-          return JSON.stringify({
-            before, after: { cols: t.cols, rows: t.rows, lines: vis() },
-          });
-        })()`,
-        awaitPromise: true, returnByValue: true,
-      });
-      const g = JSON.parse(r.result.value || "{}");
-      check(g.after && g.after.rows < g.before.rows,
-        `a smaller grid is applied (${g.before && g.before.rows} -> ` +
-        `${g.after && g.after.rows} rows)`);
-
-      // Nothing from the resize machinery may remain on screen.
-      const residue = (g.after && g.after.lines || []).filter(
-        (l) => /stty|rows \d+ cols \d+/.test(l));
-      check(residue.length === 0,
-        "the resize leaves no visible command output" +
-        (residue.length ? ` (found: ${JSON.stringify(residue[0])})` : ""));
-
-      // The guest tty must agree with the emulator grid.
-      await focusTerm(cdp);
-      await typeText(cdp, "echo SZ=$(stty size)");
-      await pressEnter(cdp);
-      await sleep(1500);
-      const vis = await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
-          const t = window.emulator.serial_adapter.term;
-          const b = t.buffer.active; const lines = [];
-          for (let y = b.viewportY; y < b.viewportY + t.rows; y++) {
-            const l = b.getLine(y); lines.push(l ? l.translateToString(true) : "");
-          }
-          return JSON.stringify(lines);
-        })()`, returnByValue: true,
-      });
-      const lines = JSON.parse(vis.result.value || "[]");
-      let last = null;
-      for (const ln of lines) {
-        const m = ln.trim().match(/^SZ=(\d+)\s+(\d+)$/);
-        if (m) last = m;
-      }
-      check(!!last && Number(last[1]) === g.after.rows &&
-            Number(last[2]) === g.after.cols,
-        `guest tty matches the emulator grid (stty size = ` +
-        `${last ? last[1] + " " + last[2] : "?"}, grid = ` +
-        `${g.after.rows} ${g.after.cols})`);
-
-      // Restore a normal terminal for the remaining phases.
-      await cdp.send("Runtime.evaluate", { expression: `fitTerminal()` });
-      await sleep(800);
-    }
-
-    /* ---- offline packs: exercise the real dialog logic in the page ---- */
-    const pack = await cdp.send("Runtime.evaluate", {
-      expression: `(async () => {
-        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-        const out = {};
-
-        // Keep this cheap: the R2 mirror is throttled, so downloading the FULL
-        // pack (5,600 chunks) would take minutes. Common is 701 chunks, and a
-        // small synthetic pack gives us the "two packs, overlapping" case.
-        const states = async () => window.GoPacks.packStates();
-
-        // 1. Save common, then Save it again: the second must fetch nothing.
-        await window.GoPacks.install("common");
-        let st = await states();
-        out.commonComplete = st.common.complete;
-        out.commonPresent = st.common.present;
-        const mark = performance.now();
-        await window.GoPacks.install("common");   // second Save
-        st = await states();
-        out.secondSavePresent = st.common.present;
-        out.secondSaveMs = Math.round(performance.now() - mark);
-
-        // 2. Remove common: no other pack is saved, so it goes.
-        const beforeRm = await (async () => {
-          const c = await caches.open("golinux-pack-v13");
-          return (await c.keys()).length;
-        })();
-        const rm = await window.GoPacks.removePack("common");
-        st = await states();
-        out.afterRemoveCommon = st.common.present;
-        out.packCacheKeysBefore = beforeRm;
-        out.removeResult = rm;
-
-        // 3. Two saved packs that overlap: removing one must keep the other.
-        //    Seeded directly (not downloaded) to keep the smoke test fast.
-        {
-          // Use the app's own pack URL helper: packs live on the asset origin.
-          const all = await (await fetch(glPackUrl("full.json"),
-            { cache: "no-store" })).json();
-          const pc = await caches.open("golinux-pack-v13");
-          for (const n of all) {
-            await pc.put(location.origin + "/images/debian-chunks/3a3a2a8af275cc11/" + n,
-              new Response("x"));
-          }
-          await window.GoPacks.removePack("common");
-          const cached = new Set((await pc.keys()).map(k => k.url));
-          out.fullSurvivesRemoveCommon = all.every(n =>
-            cached.has(location.origin + "/images/debian-chunks/3a3a2a8af275cc11/" + n));
-          // Clean up so later phases start from a known state.
-          await window.GoPacks.useMinimal();
+/** Injected before page scripts to spy on ALL guest stdin channels (INV-1). */
+const STDIN_SPY_INIT = `
+  window.__stdinSpy = { serial0SendCalls: 0, injectedBytes: [], userTyping: false };
+  const origDefine = Object.defineProperty;
+  const wrapV86 = (V86Ctor) => {
+    if (!V86Ctor || V86Ctor.__spied) return V86Ctor;
+    const origSerialSend = V86Ctor.prototype.serial0_send;
+    V86Ctor.prototype.serial0_send = function(s) {
+      window.__stdinSpy.serial0SendCalls++;
+      window.__stdinSpy.injectedBytes.push({ via: "serial0_send", s: String(s) });
+      return origSerialSend.call(this, s);
+    };
+    const Wrapped = function(...args) {
+      const emu = new V86Ctor(...args);
+      const origBusSend = emu.bus.send.bind(emu.bus);
+      emu.bus.send = function(name, val) {
+        if ((name === "serial0-input" || name === "virtio-console0-input-bytes") && !window.__stdinSpy.userTyping) {
+          window.__stdinSpy.injectedBytes.push({ via: name, len: val && val.length || 1 });
         }
+        return origBusSend(name, val);
+      };
+      return emu;
+    };
+    Wrapped.prototype = V86Ctor.prototype;
+    Wrapped.__spied = true;
+    return Wrapped;
+  };
+  let _V86;
+  origDefine(window, "V86", {
+    configurable: true,
+    get() { return _V86; },
+    set(v) { _V86 = wrapV86(v); },
+  });
+`;
 
-        // 4. Two jobs at once: the second is refused.
-        const a = window.GoPacks.install("common");
-        await sleep(50);
-        const b = await window.GoPacks.install("common");
-        out.secondRefused = !!(b && b.refused);
-        window.GoPacks.cancel();
-        await a;
-        await sleep(200);
-
-        return JSON.stringify(out);
-      })()`,
-      awaitPromise: true, returnByValue: true,
-    });
-    if (process.env.SMOKE_DEBUG) {
-      console.log("DEBUG raw pack result:", JSON.stringify(pack).slice(0, 500));
-    }
-    let packRes = {};
-    try { packRes = JSON.parse(pack.result.value || "{}"); }
-    catch (e) {
-      packRes = { error: "unparseable",
-        exception: pack.exceptionDetails ? pack.exceptionDetails.text : null,
-        raw: String(pack.result.value).slice(0, 300) };
-    }
-    out.pack = packRes;
-    out.log.push("packs: " + JSON.stringify(packRes).slice(0, 600));
-    out.log.push(`cold compile took ${((Date.now() - t0) / 1000).toFixed(1)}s, ` +
-      `${hits} chunk requests`);
-    return out;
-  } finally {
-    try { if (chrome) chrome.kill("SIGKILL"); } catch (e) {}
-    try { require("node:child_process").execFileSync("rm", ["-rf", tmp]); } catch (e) {}
-  }
+async function setUserTyping(cdp, on) {
+  await cdp.send("Runtime.evaluate", { expression: `window.__stdinSpy.userTyping = ${!!on};` });
 }
 
-/* ---------------- main ---------------- */
+async function launchChrome(profileDir, port) {
+  const chrome = spawn(chromePath(), [
+    "--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${profileDir}`,
+    "--no-first-run", "--no-default-browser-check", "--disable-extensions",
+    "--disable-dev-shm-usage", "--window-size=1280,900", "about:blank",
+  ], { stdio: "ignore" });
+  await waitForHttp(`http://127.0.0.1:${port}/json/version`, 20000, "Chrome");
+  const targets = await waitForHttp(`http://127.0.0.1:${port}/json/list`, 10000, "targets");
+  const page = targets.find((t) => t.type === "page");
+  const cdp = await connect(page.webSocketDebuggerUrl);
+  await cdp.send("Page.enable");
+  await cdp.send("Runtime.enable");
+  await cdp.send("Network.enable");
+  await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: STDIN_SPY_INIT });
+  return { chrome, cdp };
+}
 
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "golinux-smoke-"));
-  let chrome = null;
-  let appSrv = null;
-  let assetSrv = null;
+  let chrome = null, appSrv = null, assetSrv = null;
 
   const cleanup = () => {
     try { if (chrome) chrome.kill("SIGKILL"); } catch (e) {}
     try { if (appSrv) appSrv.close(); } catch (e) {}
     try { if (assetSrv) assetSrv.close(); } catch (e) {}
     if (!KEEP) { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) {} }
-    else console.log("kept temp dir: " + tmp);
   };
   process.on("exit", cleanup);
 
@@ -573,310 +310,282 @@ async function runColdCompile(ctx) {
     if (!fs.existsSync(path.join(PAGES_SRC, "index.html"))) {
       throw new Error(`${PAGES_SRC} is not a built Pages dir; run build-pages.sh`);
     }
-    const buildInfo = JSON.parse(
-      fs.readFileSync(path.join(ROOT, "images", "build-id.json"), "utf8"));
-    const buildId = buildInfo.buildId;
-
-    /* --- 1. build the two origins --- */
+    const buildId = JSON.parse(fs.readFileSync(path.join(ROOT, "images/build-id.json"), "utf8")).buildId;
     const assetDir = path.join(tmp, "r2");
     const staged = stageR2Mirror(assetDir, buildId);
-    console.log(`R2 mirror: ${staged.chunks} chunk files, ${staged.packs} packs ` +
-      `under images/debian-chunks/${buildId}/`);
 
     const appDir = path.join(tmp, "app");
     fs.cpSync(PAGES_SRC, appDir, { recursive: true });
-    // The app must have the precache list, or it cannot tell zeroed chunks
-    // from real ones.
-    check(fs.existsSync(path.join(appDir, "chunks-precache.json")),
-      "staged app includes chunks-precache.json");
+    check(fs.existsSync(path.join(appDir, "chunks-precache.json")), "staged app includes chunks-precache.json");
 
-    // Start the asset origin first so we know its port, then point the temp
-    // copy of the app at it. NEVER touch .deploy-pages itself.
     const assetLog = [];
-    // Throttle chunks so a cold compile lasts long enough for the 500 ms
-    // indicator window to be exercised, as it would on a real slow link.
-    const a = await serve(assetDir, { assetOrigin: true,
-      realChunks: staged.real, log: assetLog,
-      // ~1 MB/s: a cold gcc compile takes ~10 s (well over the 500 ms
-      // indicator window) without making the whole test slow.
-      throttle: { bps: 1024 * 1024, latencyMs: 20 } });
+    const assetOffline = { value: false };
+    const a = await serve(assetDir, {
+      assetOrigin: true, realChunks: staged.real, log: assetLog,
+      offlineRef: assetOffline,
+      throttle: { bps: 1024 * 1024, latencyMs: 20 },
+    });
     assetSrv = a.server;
     const assetOrigin = `http://127.0.0.1:${a.port}`;
 
     const cfgPath = path.join(appDir, "packs-config.js");
     const cfg = fs.readFileSync(cfgPath, "utf8");
-    const rewritten = cfg.replace(/^const GL_ASSET_ORIGIN\s*=\s*"[^"]*";/m,
-      `const GL_ASSET_ORIGIN = "${assetOrigin}";`);
+    const rewritten = cfg.replace(/^const GL_ASSET_ORIGIN\s*=\s*"[^"]*";/m, `const GL_ASSET_ORIGIN = "${assetOrigin}";`);
     if (rewritten === cfg) throw new Error("could not rewrite GL_ASSET_ORIGIN");
-    // Disable prefetch for this run: the point is to observe the compile's OWN
-    // disk reads. With prefetch on, it legitimately serves them from cache and
-    // the compile fetches only a handful of chunks.
-    const noPrefetch = rewritten.replace(/^const GL_PREFETCH = true;/m,
-      "const GL_PREFETCH = false;");
-    fs.writeFileSync(cfgPath, noPrefetch);
-    check(
-      fs.readFileSync(path.join(PAGES_SRC, "packs-config.js"), "utf8")
-        .includes(`"${PROD_ASSET_ORIGIN}"`),
-      ".deploy-pages keeps its production GL_ASSET_ORIGIN (temp copy only)");
+    fs.writeFileSync(cfgPath, rewritten);
+    check(fs.readFileSync(path.join(PAGES_SRC, "packs-config.js"), "utf8").includes(`"${PROD_ASSET_ORIGIN}"`),
+      ".deploy-pages keeps production GL_ASSET_ORIGIN");
 
     const appLog = [];
     const p = await serve(appDir, { log: appLog });
     appSrv = p.server;
     const appOrigin = `http://127.0.0.1:${p.port}`;
-    console.log(`app origin   : ${appOrigin}`);
-    console.log(`asset origin : ${assetOrigin}`);
 
-    /* --- 2. fresh headless Chrome --- */
-    const profile = path.join(tmp, "chrome-profile");
+    const profile = path.join(tmp, "profile");
     fs.mkdirSync(profile, { recursive: true });
-    const cdpPort = 9200 + Math.floor(Math.random() * 500);
-    chrome = spawn(chromePath(), [
-      "--headless=new",
-      `--remote-debugging-port=${cdpPort}`,
-      `--user-data-dir=${profile}`,
-      "--no-first-run", "--no-default-browser-check",
-      "--disable-extensions", "--disable-dev-shm-usage",
-      "--window-size=1280,900",
-      "about:blank",
-    ], { stdio: "ignore" });
+    const launched = await launchChrome(profile, 9200 + Math.floor(Math.random() * 500));
+    chrome = launched.chrome;
+    const cdp = launched.cdp;
 
-    await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, 20000, "Chrome");
-    const targets = await waitForHttp(`http://127.0.0.1:${cdpPort}/json/list`,
-      10000, "target list");
-    const page = (Array.isArray(targets) ? targets : []).find((t) => t.type === "page");
-    if (!page) throw new Error("no page target");
-    const cdp = await connect(page.webSocketDebuggerUrl);
-
-    const chunks = [];       // { url, status }
-    const chunkReqs = new Map();
-    cdp.on((msg) => {
-      if (msg.method === "Network.requestWillBeSent") {
-        const u = msg.params.request.url;
-        if (/\/debian-chunks\/[^/]*chunk-\d+-\d+\.zst$/.test(u)) {
-          const rec = { id: msg.params.requestId, url: u, status: null };
-          chunks.push(rec);
-          chunkReqs.set(msg.params.requestId, rec);
-        }
-      } else if (msg.method === "Network.responseReceived") {
-        const rec = chunkReqs.get(msg.params.requestId);
-        if (rec) rec.status = msg.params.response.status;
-      }
-    });
-
-    await cdp.send("Network.enable");
-    await cdp.send("Page.enable");
-    await cdp.send("Runtime.enable");
-
-    /* --- 3. first load --- */
-    console.log("\n== first load ==");
-    const bootMark = assetLog ? assetLog.length : 0;
+    /* --- 1. First load + INV-1 boot spy --- */
+    console.log("\n== first load + INV-1 stdin spy ==");
     await cdp.send("Page.navigate", { url: appOrigin + "/" });
-    try {
-      await waitScreen(cdp, /root@golinux:~#/, 90000, "shell prompt");
-    } catch (e) {
-      // Turn a bare timeout into a diagnosis: is it the fatal overlay, or did
-      // chunks go to the wrong origin?
-      const diag = await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
-          const f = document.querySelector("#fatal");
-          const v = f && f.classList.contains("visible");
-          return JSON.stringify({
-            fatal: v,
-            title: v ? f.querySelector(".fatal-title").textContent : "",
-            detail: v ? f.querySelector(".fatal-detail").textContent : "",
-            status: (document.querySelector("#status") || {}).textContent || "",
-          });
-        })()`,
-        returnByValue: true,
-      }).catch(() => ({ result: { value: "{}" } }));
-      const d = JSON.parse(diag.result.value || "{}");
-      const chunkPaths = (log) => log.filter((r) =>
-        /\/debian-chunks\//.test(r.path)).length;
-      throw new Error("no shell prompt. " +
-        (d.fatal ? `FATAL "${d.title}": ${d.detail} ` : `status="${d.status}" `) +
-        `chunk requests: app=${chunkPaths(appLog)} asset=${chunkPaths(assetLog)}`);
+    await waitScreen(cdp, /root@golinux:~#/, 60000, "shell prompt");
+    await sleep(1500);
+
+    // Resize 3 times while idle (must NOT send any stdin bytes!)
+    for (const [w, h] of [[390, 844], [844, 390], [1280, 900]]) {
+      await cdp.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: w < 800 });
+      await sleep(300);
     }
-    addNote("shell appeared");
-    if (process.env.SMOKE_DEBUG && assetLog) {
-      const bootHits = assetLog.slice(bootMark)
-        .filter((r) => /\/chunk-\d+-\d+\.zst$/.test(r.path)).length;
-      console.log("DEBUG chunks fetched during BOOT:", bootHits);
-    }
+    const spyBoot = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `JSON.stringify(window.__stdinSpy)`, returnByValue: true,
+    })).result.value);
+    check(spyBoot.serial0SendCalls === 0 && spyBoot.injectedBytes.length === 0,
+      `INV-1: zero non-user bytes sent to guest during boot + 3 resizes (got ${spyBoot.injectedBytes.length})`);
 
-    /* --- 4. run real commands --- */
-    console.log("\n== compile and run C (cold, literally the first command) ==");
-    if (process.env.SMOKE_DEBUG) {
-      const pre = await cdp.send("Runtime.evaluate", {
-        expression: `(async () => {
-          const sets = await (async () => {
-            const r = await fetch("packs/3a3a2a8af275cc11/tools.json").catch(()=>null);
-            return r && r.ok ? r.json() : null;
-          })();
-          if (!sets) return "no tools.json";
-          const out = {};
-          for (const id of ["gcc","make"]) {
-            let have = 0;
-            for (const n of sets[id].chunks) {
-              for (const cn of ["golinux-pack-v13","golinux-data-v13"]) {
-                const c = await caches.open(cn);
-                if (await c.match("/images/debian-chunks/3a3a2a8af275cc11/" + n,
-                    { ignoreSearch: true })) { have++; break; }
-              }
-            }
-            out[id] = have + "/" + sets[id].chunks.length;
-          }
-          out.prefetch = window.prefetchState ? JSON.stringify(window.prefetchState.tool) : "n/a";
-          return JSON.stringify(out);
-        })()`, awaitPromise: true, returnByValue: true });
-      console.log("DEBUG cached-before-compile:", pre.result.value);
-    }
-    /* A live session cannot be made cold by clearing caches: v86 keeps every
-     * chunk it has read in an in-RAM block cache, so the compile would be served
-     * from guest memory and fetch almost nothing. Reloading is unreliable here
-     * (the SW needs to regain control). The measurement harness proved the
-     * reliable answer: a FRESH browser profile. So run the cold-compile phase in
-     * its own clean profile, exactly as a first-time visitor would. */
-    const cold = await runColdCompile({
-      appOrigin, assetOrigin, assetLog, staged: staged.real, buildId,
-    });
-    for (const line of cold.log) console.log(line);
-    check(cold.compiled, "compiled and ran a C program (cold profile)");
-    check(cold.indicatorSeen,
-      "the 'Loading from disk' indicator appeared during a cold gcc compile" +
-      (cold.indicatorText ? ` ("${cold.indicatorText}")` : ""));
-    const pr = cold.pack || {};
-    check(pr.commonComplete === true,
-      "packs: saving Common completes (" + pr.commonPresent + " chunks)");
-    check(pr.secondSavePresent === pr.commonPresent && pr.secondSaveMs < 3000,
-      "packs: a second Save on a complete pack does nothing (" +
-      pr.secondSaveMs + " ms)");
-    check(pr.afterRemoveCommon === 0,
-      "packs: removing Common with nothing else saved clears it (" +
-      pr.afterRemoveCommon + " left)");
-    check(pr.fullSurvivesRemoveCommon === true,
-      "packs: removing Common while Full is saved keeps every Full chunk");
-    check(pr.secondRefused === true,
-      "packs: a second job started at once is refused");
-
-    check(cold.toolLabelIsGcc,
-      "the per-tool bar labelled it 'gcc' at some point during the compile" +
-      (cold.labels && cold.labels.length
-        ? ` (first: "${cold.labels[0]}", last: "${cold.labels[cold.labels.length-1]}")`
-        : ""));
-    if (process.env.SMOKE_DEBUG) {
-      console.log("DEBUG cold phase:", JSON.stringify(cold.stats));
-    }
-
-    const logMark = assetLog ? assetLog.length : 0;
-
-    /* --- 5. persistence across reload --- */
-    console.log("\n== persistence ==");
-    let s = await run(cdp, "echo SURVIVED > /root/marker.txt && cat /root/marker.txt",
-      /SURVIVED/, 60000, "write marker");
-    check(/SURVIVED/.test(s), "wrote /root/marker.txt");
-
-    // Force a save through the public API (autosave is on a 30 s timer).
-    // saveNow() deliberately DEFERS while the shell is busy, so wait for the
-    // prompt to come back and for the 500 ms atPrompt poll, then retry until
-    // the state is actually written.
-    await waitScreen(cdp, /root@golinux:~#\s*$/, 30000, "idle prompt");
-    await sleep(1200);
-    const saved = await cdp.send("Runtime.evaluate", {
-      expression: `(async () => {
-        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-        try {
-          for (let i = 0; i < 40; i++) {
-            await window.GoPersist.saveNow(window.emulator, "manual");
-            const meta = await window.GoPersist.readMeta();
-            if (meta && meta.buildId) {
-              return JSON.stringify({ ok: true, meta, tries: i + 1 });
-            }
-            await sleep(500);
-          }
-          const meta = await window.GoPersist.readMeta();
-          return JSON.stringify({ ok: false, meta });
-        } catch (e) { return JSON.stringify({ ok: false, err: String(e) }); }
-      })()`,
-      awaitPromise: true, returnByValue: true,
-    });
-    const savedObj = JSON.parse(saved.result.value || "{}");
-    check(savedObj.ok && savedObj.meta && savedObj.meta.buildId === buildId,
-      "saved user state is stamped with the build id" +
-      (savedObj.ok ? "" : ` (${JSON.stringify(savedObj).slice(0, 200)})`));
-
-    await cdp.send("Page.reload", { ignoreCache: false });
-    await waitScreen(cdp, /root@golinux:~#/, 90000, "shell after reload");
-    s = await run(cdp, "cat /root/marker.txt", /SURVIVED|No such file/, 60000,
-      "marker after reload");
-    check(/SURVIVED/.test(s), "/root file survived the reload");
-
-    // No fatal overlay.
-    const fatal = await cdp.send("Runtime.evaluate", {
+    /* --- 2. Cold gcc compile: output NOT erased when #diskToast shows & hides --- */
+    console.log("\n== cold gcc compile + output preservation ==");
+    await cdp.send("Runtime.evaluate", {
       expression: `(() => {
-        const f = document.querySelector("#fatal");
-        const visible = f && f.classList.contains("visible");
-        return JSON.stringify({ visible, title: visible ?
-          f.querySelector(".fatal-title").textContent : "" });
+        window.__toastSeen = false;
+        const t = document.getElementById("diskToast");
+        new MutationObserver(() => {
+          if (t.classList.contains("visible")) window.__toastSeen = true;
+        }).observe(t, { attributes: true, attributeFilter: ["class"] });
+      })()`,
+    });
+    await setUserTyping(cdp, true);
+    await runCmd(
+      cdp,
+      "printf 'int main(){return 0;}' > /root/t.c && gcc /root/t.c -o /root/t && /root/t && echo GCC_OUTPUT_INTACT",
+      /GCC_OUTPUT_INTACT[\s\S]*GCC_OUTPUT_INTACT/,
+      180000,
+      "cold gcc compile"
+    );
+    await setUserTyping(cdp, false);
+    // Wait past #diskToast hide settle (1200ms) and assert output was NEVER erased!
+    await sleep(1200);
+    const afterGcc = await screenText(cdp);
+    const toastSeen = (await cdp.send("Runtime.evaluate", {
+      expression: `window.__toastSeen`, returnByValue: true,
+    })).result.value;
+    check(toastSeen === true, "floating #diskToast appeared during cold gcc compile");
+    check(afterGcc.includes("GCC_OUTPUT_INTACT"),
+      "gcc output stays intact on screen after compile and after #diskToast hides (no Ctrl-L erase!)");
+
+    /* --- 3. Native TERM=xterm-256color + clean nano scrollback --- */
+    console.log("\n== TERM & nano alternate screen ==");
+    await setUserTyping(cdp, true);
+    const termOut = await runCmd(
+      cdp,
+      "echo T=$TERM; tput smcup >/dev/null 2>&1 && echo SMCUP_OK",
+      /T=xterm-256color[\s\S]*SMCUP_OK/,
+      15000,
+      "TERM check"
+    );
+    check(/T=xterm-256color/.test(termOut) && /SMCUP_OK/.test(termOut),
+      "native TERM=xterm-256color with alternate screen (without serial0_send)");
+
+    const baseBeforeNano = (await cdp.send("Runtime.evaluate", {
+      expression: `window.emulator.virtio_console_adapter.term.buffer.active.baseY`, returnByValue: true,
+    })).result.value;
+    await focusTerm(cdp);
+    await typeText(cdp, "nano /root/n.txt");
+    await pressEnter(cdp);
+    await sleep(2000);
+    await pressCtrl(cdp, "x");
+    await sleep(1000);
+    await setUserTyping(cdp, false);
+    const nanoCheck = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const b = window.emulator.virtio_console_adapter.term.buffer.active;
+        let nanoLines = 0;
+        for (let y = 0; y < b.length; y++) {
+          const l = b.getLine(y);
+          if (l && /GNU nano/.test(l.translateToString(true))) nanoLines++;
+        }
+        return JSON.stringify({ nanoLines, baseY: b.baseY });
       })()`,
       returnByValue: true,
+    })).result.value);
+    check(nanoCheck.nanoLines === 0, `nano leaves zero residue in buffer (found ${nanoCheck.nanoLines})`);
+    check(nanoCheck.baseY === baseBeforeNano, `nano adds zero scrollback lines (${baseBeforeNano} -> ${nanoCheck.baseY})`);
+
+    /* --- 4. Out-of-band virtio-console resize preserves half-typed command --- */
+    console.log("\n== virtio-console out-of-band resize ==");
+    await setUserTyping(cdp, true);
+    await focusTerm(cdp);
+    await typeText(cdp, "echo TYPED_SURVIVES");
+    await setUserTyping(cdp, false);
+    await sleep(200);
+    // Resize window while half-typed command is sitting on the prompt!
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 640, height: 480, deviceScaleFactor: 1, mobile: false });
+    await sleep(700);
+    await setUserTyping(cdp, true);
+    await pressEnter(cdp);
+    const survived = await waitScreen(cdp, /TYPED_SURVIVES[\s\S]*TYPED_SURVIVES/, 15000, "half-typed command runs");
+    check(!/stty (rows|echo|-echo)/.test(survived), "zero stty injection during resize");
+
+    // Verify guest stty size matches browser xterm grid
+    const szOut = await runCmd(cdp, "echo SZ=$(stty size) END_SZ", /SZ=\d+ \d+ END_SZ/, 15000, "stty size");
+    await setUserTyping(cdp, false);
+    const gridNow = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(() => { const t = window.emulator.virtio_console_adapter.term; return JSON.stringify({ cols: t.cols, rows: t.rows }); })()`,
+      returnByValue: true,
+    })).result.value);
+    const szMatch = szOut.match(/SZ=(\d+) (\d+) END_SZ/);
+    check(!!szMatch && Number(szMatch[1]) === gridNow.rows && Number(szMatch[2]) === gridNow.cols,
+      `guest tty matches xterm grid via virtio-console0-resize (${szMatch ? szMatch[1] + "x" + szMatch[2] : "?"} vs ${gridNow.rows}x${gridNow.cols})`);
+
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(400);
+
+    /* --- 5. Persistence across reload + INV-1 spy on restore --- */
+    console.log("\n== persistence & restore ==");
+    await setUserTyping(cdp, true);
+    await runCmd(cdp, "echo SURVIVED_TEST > /root/marker.txt && cat /root/marker.txt", /SURVIVED_TEST/, 20000, "write marker");
+    await setUserTyping(cdp, false);
+    await sleep(400);
+
+    const savedObj = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const ok = await window.GoPersist.saveNow(window.emulator, "manual");
+        const meta = await window.GoPersist.readMeta();
+        return JSON.stringify({ ok, meta });
+      })()`,
+      awaitPromise: true, returnByValue: true,
+    })).result.value);
+    check(savedObj.ok && savedObj.meta && savedObj.meta.buildId === buildId && savedObj.meta.schema === 2,
+      "saved state stamped with buildId and schema=2");
+
+    await cdp.send("Page.reload", { ignoreCache: false });
+    await waitScreen(cdp, /\[session restored\]/, 60000, "restored banner");
+    await sleep(800);
+    const spyRestore = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `JSON.stringify(window.__stdinSpy)`, returnByValue: true,
+    })).result.value);
+    check(spyRestore.serial0SendCalls === 0 && spyRestore.injectedBytes.length === 0,
+      `INV-1: zero non-user bytes sent on session restore`);
+
+    await setUserTyping(cdp, true);
+    const afterReload = await runCmd(cdp, "cat /root/marker.txt", /SURVIVED_TEST|No such file/, 20000, "marker after reload");
+    await setUserTyping(cdp, false);
+    check(/SURVIVED_TEST/.test(afterReload), "/root/marker.txt survived reload");
+
+    /* --- 6. Safe Restart button (BUG-22) --- */
+    console.log("\n== safe Restart button ==");
+    await cdp.send("Runtime.evaluate", { expression: `document.getElementById("restart").click()` });
+    await sleep(1500);
+    await waitScreen(cdp, /session restored|root@golinux:~#/, 30000, "prompt after Restart");
+    await setUserTyping(cdp, true);
+    const afterRestart = await runCmd(cdp, "echo RESTART_ALIVE", /RESTART_ALIVE[\s\S]*RESTART_ALIVE/, 20000, "after Restart");
+    await setUserTyping(cdp, false);
+    check(/RESTART_ALIVE/.test(afterRestart), "Restart button boots working shell (never hangs SeaBIOS, BUG-22)");
+
+    /* --- 7. Safe Reset button (BUG-15) --- */
+    console.log("\n== safe Reset button ==");
+    await cdp.send("Runtime.evaluate", {
+      expression: `window.confirm = () => true; document.getElementById("resetBtn").click();`,
     });
-    const fatalObj = JSON.parse(fatal.result.value || "{}");
-    check(!fatalObj.visible, "no fatal 'out of date' overlay (got: " +
-      (fatalObj.title || "none") + ")");
+    await sleep(2500);
+    await waitScreen(cdp, /root@golinux:~#/, 60000, "prompt after Reset");
+    await setUserTyping(cdp, true);
+    const afterReset = await runCmd(cdp, "test -f /root/marker.txt && echo STILL_THERE || echo CLEAN_RESET", /STILL_THERE|CLEAN_RESET/, 20000, "after Reset");
+    await setUserTyping(cdp, false);
+    check(/CLEAN_RESET/.test(afterReset), "Reset wiped saved session cleanly without pagehide re-save race (BUG-15)");
 
-    /* --- 6. network assertions --- */
-    console.log("\n== network ==");
-    // Ground truth: what each origin actually served (this includes requests
-    // made by the service worker, which CDP's Network domain does not show).
-    const chunkHits = (log) => log.filter((r) =>
-      /\/debian-chunks\/(?:[^/]+\/)?chunk-\d+-\d+\.zst$/.test(r.path));
+    /* --- 8. Fresh-vs-Upgrade: mismatched buildId rejected online AND offline (BUG-05) --- */
+    console.log("\n== upgrade safety (online & offline) ==");
+    await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const root = await navigator.storage.getDirectory();
+        const dir = await root.getDirectoryHandle("golinux", { create: true });
+        const sf = await dir.getFileHandle("state.gz", { create: true });
+        const sw = await sf.createWritable();
+        await sw.write(new Blob([new Uint8Array([1, 2, 3])]));
+        await sw.close();
+        const mf = await dir.getFileHandle("meta.json", { create: true });
+        const mw = await mf.createWritable();
+        await mw.write(JSON.stringify({ buildId: "0000000000000001", schema: 2 }));
+        await mw.close();
+      })()`,
+      awaitPromise: true,
+    });
+    // Reload offline: MUST reject mismatched buildId even when offline!
+    await cdp.send("Network.emulateNetworkConditions", {
+      offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
+    });
+    await cdp.send("Page.reload", { ignoreCache: false });
+    await waitScreen(cdp, /root@golinux:~#/, 60000, "offline boot with stale state");
+    const usedStaleOffline = (await cdp.send("Runtime.evaluate", {
+      expression: `window.__usedUserState === true`, returnByValue: true,
+    })).result.value;
+    check(usedStaleOffline === false, "offline upgrade: mismatched saved buildId is refused (BUG-05)");
 
-    if (process.env.SMOKE_DEBUG) {
-      const uniq = (l) => [...new Set(l.map(r => r.path))].sort();
-      console.log("APP LOG:", JSON.stringify(uniq(appLog), null, 0).slice(0, 3000));
-      console.log("ASSET LOG:", JSON.stringify(uniq(assetLog), null, 0).slice(0, 3000));
-    }
+    /* --- 9. Offline real-chunk miss shows #offlineBanner, NOT fatal "out of date" (BUG-09) --- */
+    console.log("\n== offline real-chunk UX ==");
+    // Disconnect the asset origin at TCP level so the Service Worker's own
+    // fetch() truly fails (CDP Network.emulateNetworkConditions only affects
+    // the page target, not SW fetches).
+    assetOffline.value = true;
+    await setUserTyping(cdp, true);
+    await focusTerm(cdp);
+    await typeText(cdp, "g++ --version");
+    await pressEnter(cdp);
+    await setUserTyping(cdp, false);
+    await sleep(3000);
+    const offlineUi = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `JSON.stringify({
+        banner: document.getElementById("offlineBanner").classList.contains("visible"),
+        fatal: document.getElementById("fatal").classList.contains("visible"),
+      })`,
+      returnByValue: true,
+    })).result.value);
+    check(offlineUi.banner === true, "offline real-chunk miss displays #offlineBanner");
+    check(offlineUi.fatal === false, "offline real-chunk miss does NOT show fatal 'out of date' (BUG-09)");
+    assetOffline.value = false;
+    await cdp.send("Network.emulateNetworkConditions", {
+      offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
+    });
+
+    /* --- 10. Network assertions --- */
+    console.log("\n== network assertions ==");
+    const chunkHits = (log) => log.filter((r) => /\/debian-chunks\/(?:[^/]+\/)?chunk-\d+-\d+\.zst$/.test(r.path));
     const assetChunks = chunkHits(assetLog);
     const appChunks = chunkHits(appLog);
-    console.log(`asset origin: ${assetChunks.length} chunk requests, ` +
-      `app origin: ${appChunks.length} chunk requests`);
-
-    check(assetChunks.length > 0,
-      "the guest actually fetched disk chunks from the asset origin");
-
-    check(appChunks.length === 0,
-      "no chunk request reached the app origin" +
-      (appChunks.length ? ` (${appChunks[0].path} -> ${appChunks[0].status})` : ""));
-
-    const prefixed = `images/debian-chunks/${buildId}/`;
-    const wrongPath = assetChunks.filter((r) => !r.path.startsWith("/" + prefixed));
-    check(wrongPath.length === 0,
-      "every chunk path on the asset origin contained the build id (" +
-      buildId + ")" +
-      (wrongPath.length ? ` (${wrongPath[0].path})` : ""));
-
+    check(assetChunks.length > 0, `guest fetched ${assetChunks.length} chunks from asset origin`);
+    check(appChunks.length === 0, "zero chunk requests reached app origin");
+    const prefixed = `/images/debian-chunks/${buildId}/`;
+    check(assetChunks.every((r) => r.path.startsWith(prefixed)), `every chunk path carries buildId ${buildId}`);
     const realHits = assetChunks.filter((r) => staged.real.has(path.basename(r.path)));
-    check(realHits.length > 0,
-      `fetched ${realHits.length} real data chunks`);
-    const realNot200 = realHits.filter((r) => r.status !== 200);
-    check(realNot200.length === 0,
-      "every REAL chunk request returned 200" +
-      (realNot200.length ?
-        ` (${realNot200[0].path} -> ${realNot200[0].status})` : ""));
-
-    const zeroed = assetChunks.filter((r) => !staged.real.has(path.basename(r.path)));
-    const zeroedNot404 = zeroed.filter((r) => r.status !== 404);
-    check(zeroedNot404.length === 0,
-      "every zeroed-chunk request on the asset origin 404ed (as R2 does)" +
-      (zeroedNot404.length ?
-        ` (${zeroedNot404[0].path} -> ${zeroedNot404[0].status})` : ""));
+    check(realHits.length > 0 && realHits.every((r) => r.status === 200), "every real chunk returned 200");
+    const zeroHits = assetChunks.filter((r) => !staged.real.has(path.basename(r.path)));
+    check(zeroHits.every((r) => r.status === 404), "every zeroed chunk 404ed on R2 mirror");
   } catch (e) {
-    bad(e.message);
+    bad(e.stack || e.message);
   } finally {
     console.log(`\n${failures === 0 ? "PASS" : "FAIL"} (${failures} failure(s))`);
     process.exit(failures ? 1 : 0);
   }
 })();
-
-const notes = [];
-function addNote(n) { notes.push(n); }

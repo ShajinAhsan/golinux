@@ -26,7 +26,11 @@ for (const id of ["common", "full"]) {
   if (!fs.existsSync(file)) continue;
   const list = JSON.parse(fs.readFileSync(file, "utf8"));
   const bytes = list.reduce((sum, f) => {
-    try { return sum + fs.statSync(path.join(CHUNKS, f)).size; } catch (e) { return sum; }
+    const p = path.join(CHUNKS, f);
+    if (!fs.existsSync(p)) {
+      throw new Error(`packs/${id}.json references missing chunk: ${f}`);
+    }
+    return sum + fs.statSync(p).size;
   }, 0);
   out[id] = {
     title: id === "full" ? "Full" : "Common tools",

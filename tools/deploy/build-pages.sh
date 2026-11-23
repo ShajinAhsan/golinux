@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Assemble the static directory the golinux WORKER serves (static assets).
 #
-#   ./tools/deploy/build-pages.sh [outdir]     (default: .deploy-pages)
+#   ./tools/deploy/build-pages.sh [outdir] [--build-id <id>]  (default: .deploy-pages)
 #
 # Layout produced:
-#   index.html, manifest.json, *.js      app shell
-#   sw.js, _headers                      app worker + header rules
-#   assets/                              wasm, xterm, BIOS
+#   index.html, styles.css, js/*.js, manifest.json, *.js   app shell
+#   sw.js, _headers                                        app worker + header rules
+#   assets/                                                wasm, xterm, BIOS
 #   icons/
-#   images/                              kernel, initrd, snapshot, build-id
+#   images/                                                kernel, initrd, snapshot, build-id
 #
 # Deliberately excluded:
 #   images/debian-chunks/    -> R2 (41k files; the Worker allows 20,000 free)
@@ -18,7 +18,28 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
-OUT="${1:-$ROOT/.deploy-pages}"
+OUT="$ROOT/.deploy-pages"
+OVERRIDE_BUILD_ID=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --build-id)
+      [ $# -ge 2 ] || { echo "ERROR: --build-id requires a value" >&2; exit 2; }
+      OVERRIDE_BUILD_ID="$2"
+      shift 2
+      ;;
+    -h|--help)
+      sed -n '2,16p' "$0"; exit 0
+      ;;
+    -*)
+      echo "ERROR: unknown argument: $1" >&2; exit 2
+      ;;
+    *)
+      OUT="$1"
+      shift
+      ;;
+  esac
+done
 
 # Cloudflare Workers static assets limits (verified 2026-11-23):
 #   - 25 MiB per file, all plans
@@ -28,25 +49,27 @@ LIMIT_BYTES=$((25 * 1024 * 1024))
 LIMIT_FILES=20000
 
 # REFUSE TO SHIP FLAT PATHS. Checked BEFORE any copying so a missing or empty
-# build id fails with a clear message instead of a bare cp error. An empty
-# GL_BUILD_ID would make the deployed app request
-# images/debian-chunks/chunk-*.zst (unversioned), letting a previous build's
-# bytes be served from cache (silent corruption). Never a silent flat deploy.
-if [ ! -f "$ROOT/images/build-id.json" ]; then
-  echo "ERROR: images/build-id.json is missing — cannot stamp GL_BUILD_ID." >&2
-  echo "       Refusing to build a deploy with flat, unversioned chunk paths." >&2
-  echo "       Run: node tools/image/build-id.js  (after build.sh)" >&2
-  exit 1
+# build id fails with a clear message instead of a bare cp error.
+if [ -n "$OVERRIDE_BUILD_ID" ]; then
+  BUILD_ID="$OVERRIDE_BUILD_ID"
+  echo "Using explicit rollback/override build id: $BUILD_ID"
+else
+  if [ ! -f "$ROOT/images/build-id.json" ]; then
+    echo "ERROR: images/build-id.json is missing — cannot stamp GL_BUILD_ID." >&2
+    echo "       Refusing to build a deploy with flat, unversioned chunk paths." >&2
+    echo "       Run: node tools/image/build-id.js  (after build.sh)" >&2
+    exit 1
+  fi
+  BUILD_ID="$(node -e 'process.stdout.write(require(process.argv[1]).buildId || "")' "$ROOT/images/build-id.json")"
 fi
-BUILD_ID="$(node -e 'process.stdout.write(require(process.argv[1]).buildId || "")' "$ROOT/images/build-id.json")"
 case "$BUILD_ID" in
   "")
-    echo "ERROR: images/build-id.json has an empty buildId." >&2
+    echo "ERROR: buildId is empty." >&2
     echo "       Refusing to build a deploy with flat, unversioned chunk paths." >&2
     echo "       Run: node tools/image/build-id.js" >&2
     exit 1 ;;
   *[!0-9a-f]*)
-    echo "ERROR: images/build-id.json buildId is not lowercase hex: '$BUILD_ID'" >&2
+    echo "ERROR: buildId is not lowercase hex: '$BUILD_ID'" >&2
     exit 1 ;;
 esac
 
@@ -54,13 +77,19 @@ rm -rf "$OUT"
 mkdir -p "$OUT/images" "$OUT/assets/xterm" "$OUT/assets/bios" "$OUT/assets/v86" "$OUT/icons"
 
 cp "$ROOT"/index.html "$ROOT"/about.html "$ROOT"/manifest.json "$OUT"/
+if [ -f "$ROOT/styles.css" ]; then
+  cp "$ROOT/styles.css" "$OUT/"
+fi
+if [ -d "$ROOT/js" ]; then
+  mkdir -p "$OUT/js"
+  cp "$ROOT"/js/*.js "$OUT/js/"
+fi
 cp "$ROOT"/packs-config.js "$ROOT"/packs.js "$ROOT"/persist.js \
    "$ROOT"/persist-9p.js "$OUT"/
 cp "$ROOT"/sw.js "$OUT"/
 cp "$ROOT"/public/_headers "$OUT"/
 cp "$ROOT"/icons/*.png "$OUT/icons/"
-cp "$ROOT"/assets/xterm/xterm.js "$ROOT"/assets/xterm/xterm.css \
-   "$ROOT"/assets/xterm/addon-fit.js "$OUT/assets/xterm/"
+cp "$ROOT"/assets/xterm/xterm.js "$ROOT"/assets/xterm/xterm.css "$OUT/assets/xterm/"
 cp "$ROOT"/assets/bios/seabios.bin "$ROOT"/assets/bios/vgabios.bin "$OUT/assets/bios/"
 cp "$ROOT"/assets/v86/libv86.js "$ROOT"/assets/v86/v86.wasm \
    "$ROOT"/assets/v86/v86-fallback.wasm "$OUT/assets/v86/"
@@ -78,6 +107,15 @@ fi
 cp "$ROOT/chunks-precache.json" "$OUT"/chunks-precache.json
 cp "$ROOT"/images/debian-bzImage "$ROOT"/images/debian-initrd \
    "$ROOT"/images/debian-state.bin.zst "$ROOT"/images/build-id.json "$OUT/images/"
+if [ -n "$OVERRIDE_BUILD_ID" ]; then
+  node -e '
+    const fs = require("fs");
+    const p = process.argv[1];
+    const j = JSON.parse(fs.readFileSync(p, "utf8"));
+    j.buildId = process.argv[2];
+    fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+  ' "$OUT/images/build-id.json" "$BUILD_ID"
+fi
 
 # Stamp the build id (validated above) so the deployed app requests this
 # build's chunk paths. Done on the COPY under $OUT, never on the source tree, so
@@ -105,14 +143,19 @@ echo "   stamped GL_BUILD_ID = $BUILD_ID"
 
 # Final gate on the STAGED tree: --deploy requires a non-empty, matching build
 # id, so a flat unversioned deploy cannot leave this script.
-node "$ROOT/tools/image/verify-manifests.js" --deploy --config "$OUT/packs-config.js"
+if [ -z "$OVERRIDE_BUILD_ID" ]; then
+  node "$ROOT/tools/image/verify-manifests.js" --deploy --config "$OUT/packs-config.js"
+else
+  node "$ROOT/tools/image/verify-manifests.js" --deploy --allow-override-id --config "$OUT/packs-config.js"
+fi
 
 echo "== Assets output: $OUT =="
 
-# Fail loudly on the two limits that would break a deploy.
+# Fail loudly on the two limits that would break a deploy, and warn above 90%.
 python3 - "$OUT" "$LIMIT_BYTES" "$LIMIT_FILES" <<'PY'
 import os, sys
 out, limit_bytes, limit_files = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+warn_bytes = int(limit_bytes * 0.90)
 files = []
 for root, _, names in os.walk(out):
     for n in names:
@@ -120,6 +163,7 @@ for root, _, names in os.walk(out):
         files.append((os.path.getsize(p), os.path.relpath(p, out)))
 total = sum(s for s, _ in files)
 bad = [(s, p) for s, p in files if s > limit_bytes]
+warn = [(s, p) for s, p in files if warn_bytes < s <= limit_bytes]
 files.sort(reverse=True)
 
 print(f"  files: {len(files)} / {limit_files}")
@@ -127,6 +171,9 @@ print(f"  total: {total / 1048576:.1f} MB")
 print("  largest:")
 for s, p in files[:5]:
     print(f"    {s / 1048576:7.2f} MB  {p}")
+
+for s, p in warn:
+    print(f"\nWARNING: {p} is {s / 1048576:.2f} MiB (>90% of 25 MiB Worker limit)")
 
 if bad:
     print("\nERROR: these exceed the 25 MiB per-file limit:")

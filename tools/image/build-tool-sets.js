@@ -68,12 +68,15 @@ if (!order.length) {
 
 /* ---------------- snapshot ---------------- */
 
-/** Decompress the shipped snapshot once; every tool restores from it. */
+const RUN_TMP = fs.mkdtempSync(path.join(os.tmpdir(), "golinux-tools-"));
+process.on("exit", () => {
+  try { fs.rmSync(RUN_TMP, { recursive: true, force: true }); } catch (e) {}
+});
+
+/** Decompress the shipped snapshot fresh for this run (never reuse stale /tmp). */
 function snapshotBuffer() {
-  const raw = path.join(os.tmpdir(), "golinux-tools-state.bin");
-  if (!fs.existsSync(raw)) {
-    execFileSync("zstd", ["-d", "-f", "-q", SNAPSHOT_ZST, "-o", raw]);
-  }
+  const raw = path.join(RUN_TMP, "state.bin");
+  execFileSync("zstd", ["-d", "-f", "-q", SNAPSHOT_ZST, "-o", raw]);
   return fs.readFileSync(raw);
 }
 
@@ -98,7 +101,7 @@ const noteRange = (start, len) => {
  */
 function makeDisk() {
   const src = path.join(ROOT, "images/debian.img");
-  const copy = path.join(os.tmpdir(), "golinux-tool-recording.img");
+  const copy = path.join(RUN_TMP, "recording.img");
   if (!fs.existsSync(copy)) {
     try {
       execFileSync("cp", ["-c", src, copy]);
@@ -255,7 +258,9 @@ function recordTool(tool, stateBuffer) {
   for (const tool of order) {
     const recorded = (await recordTool(tool, stateBuffer)).filter((c) => real.has(c));
     const bytes = recorded.reduce((s, c) => {
-      try { return s + fs.statSync(path.join(chunksDir, c)).size; } catch (e) { return s; }
+      const p = path.join(chunksDir, c);
+      if (!fs.existsSync(p)) throw new Error(`missing chunk while recording ${tool}: ${c}`);
+      return s + fs.statSync(p).size;
     }, 0);
     out[tool] = { title: tool, chunks: recorded, bytes };
     console.error(`[tools] ${tool.padEnd(5)} ${String(recorded.length).padStart(4)} chunks  ` +

@@ -20,10 +20,9 @@ import threading
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # Only the files that belong on each origin in production.
-APP_PREFIXES = ("", "assets/", "icons/", "images/debian-bzImage",
-                "images/debian-initrd", "images/debian-state.bin.zst",
-                "images/build-id.json")
+# App origin serves everything EXCEPT images/debian-chunks/ and packs/ (which belong on R2).
 ASSET_PREFIXES = ("images/debian-chunks/", "packs/")
+APP_FORBIDDEN = ASSET_PREFIXES
 
 CT = {
     ".html": "text/html; charset=utf-8",
@@ -55,7 +54,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     cors = True
     cache_headers = True
     omit_empty = False
-    allowed = APP_PREFIXES
+    is_asset = False
 
     def log_message(self, *args):
         pass
@@ -65,9 +64,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "":
             path = "index.html"
         # Reject paths that belong to the other origin, as a real split would.
-        if not any(path.startswith(p) for p in self.allowed):
-            self.send_error(404, "not on this origin")
-            return
+        if self.is_asset:
+            if not any(path.startswith(p) for p in ASSET_PREFIXES):
+                self.send_error(404, "not on this origin")
+                return
+        else:
+            if any(path.startswith(p) for p in APP_FORBIDDEN):
+                self.send_error(404, "not on this origin")
+                return
         full = os.path.join(ROOT, path)
         if not os.path.isfile(full):
             self.send_error(404)
@@ -113,8 +117,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._serve("HEAD")
 
 
-def serve(port, allowed, cors, cache_headers):
-    cls = type("H", (Handler,), {"allowed": allowed, "cors": cors,
+def serve(port, is_asset, cors, cache_headers):
+    cls = type("H", (Handler,), {"is_asset": is_asset, "cors": cors,
                                  "cache_headers": cache_headers})
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("127.0.0.1", port), cls) as httpd:
@@ -136,10 +140,10 @@ def main():
         print(f"omitting empty chunks; {len(REAL_CHUNKS or [])} real chunks stored")
 
     t1 = threading.Thread(target=serve,
-                          args=(8090, APP_PREFIXES, False, not args.no_cache_headers),
+                          args=(8090, False, False, not args.no_cache_headers),
                           daemon=True)
     t2 = threading.Thread(target=serve,
-                          args=(8091, ASSET_PREFIXES, not args.no_cors,
+                          args=(8091, True, not args.no_cors,
                                 not args.no_cache_headers),
                           daemon=True)
     t1.start()

@@ -76,18 +76,27 @@ const noteRange = (start, len) => {
  *
  * Reads go through fd.read, since fs.readFileSync refuses files over 2 GiB.
  */
+let recordingTmpDir = null;
+function cleanupTmp() {
+  if (recordingTmpDir) {
+    try { fs.rmSync(recordingTmpDir, { recursive: true, force: true }); } catch (e) {}
+    recordingTmpDir = null;
+  }
+}
+process.on("exit", cleanupTmp);
+
 function wrapRecording(recording) {
   const src = path.join(ROOT, "images/debian.img");
-  const copy = path.join(require("node:os").tmpdir(), "golinux-pack-recording.img");
+  recordingTmpDir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "golinux-pack-"));
+  const copy = path.join(recordingTmpDir, "recording.img");
 
-  if (!fs.existsSync(copy)) {
-    // -c uses clonefile on APFS: copy-on-write, effectively instant.
-    try {
-      require("node:child_process").execFileSync("cp", ["-c", src, copy]);
-    } catch (e) {
-      console.error("[packs] clone failed, falling back to a full copy");
-      fs.copyFileSync(src, copy);
-    }
+  // Always create a fresh per-run clone so an image rebuild can never silently
+  // reuse a stale /tmp recording image.
+  try {
+    require("node:child_process").execFileSync("cp", ["-c", src, copy]);
+  } catch (e) {
+    console.error("[packs] clone failed, falling back to a full copy");
+    fs.copyFileSync(src, copy);
   }
 
   const fd = fs.openSync(copy, "r+");

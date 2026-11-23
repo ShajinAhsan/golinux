@@ -53,12 +53,24 @@ apt-get install -y --reinstall --no-install-recommends man-db manpages manpages-
 
 rm -rf /var/lib/apt/lists/*
 
-# init: sysinit + autologin root on the v86 serial port
+# init: sysinit + autologin root on both serial (fallback) and virtio-console (primary, supports SIGWINCH resize)
 cat > /etc/inittab <<'EOF'
 id:2:initdefault:
 si::sysinit:/etc/init.d/rcS
-T0:23:respawn:/sbin/getty -L ttyS0 115200 vt102 --autologin root
+T0:23:respawn:/sbin/getty -L ttyS0 115200 xterm-256color --autologin root
+H0:23:respawn:/sbin/getty -L hvc0 115200 xterm-256color --autologin root
 EOF
+
+# Full-screen programs (nano, vim, less) need an alternate screen so they do not
+# paint over the scrollback. getty already sets TERM for the console; this also
+# covers shells started from elsewhere (su, second sessions).
+cat > /etc/profile.d/term.sh <<'EOF'
+# Choose a terminal with smcup/rmcup when the image provides one.
+if [ -z "$TERM" ] || [ "$TERM" = "vt102" ] || [ "$TERM" = "vt100" ] || [ "$TERM" = "dumb" ]; then
+  command -v infocmp >/dev/null 2>&1 && infocmp xterm-256color >/dev/null 2>&1 && export TERM=xterm-256color
+fi
+EOF
+chmod 644 /etc/profile.d/term.sh
 
 cat > /etc/fstab <<'EOF'
 /dev/sda / ext4 rw,relatime 0 1
@@ -68,14 +80,12 @@ EOF
 
 printf '%s\n' \
   'export HOME=/root' \
-  'export TERM=vt102' \
   'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
   'export LANG=C.UTF-8' \
   'cd /root 2>/dev/null || cd /' \
   > /root/.bash_profile
 
 printf '%s\n' \
-  'export TERM=vt102' \
   'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
   > /root/.bashrc
 

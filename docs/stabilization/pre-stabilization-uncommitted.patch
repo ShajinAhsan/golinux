@@ -1,0 +1,308 @@
+diff --git a/index.html b/index.html
+index 697ef45..1ddb972 100644
+--- a/index.html
++++ b/index.html
+@@ -1248,8 +1248,18 @@ async function bootMachine() {
+     // The snapshot restores an already-logged-in shell, so /etc/motd is never
+     // printed by login. Show it once here instead: it carries the offline,
+     // upload-path and persistence notices the user needs on first sight.
++    // TERM must advertise an alternate screen, or full-screen programs (nano,
++    // vim, less) paint over the main screen and leave their UI in the scrollback
++    // after exit - that is what made nano look unstable and left a stray
++    // scrollbar. getty sets TERM=vt102, which has no smcup/rmcup; the image
++    // ships xterm-256color, which does.
++    //
++    // This has to be sent on BOTH paths: a restored snapshot carries its own
++    // environment (TERM=vt102 from getty), and a cold boot gets the same value
++    // from getty. It is one short line at boot, before the user can type.
+     if (initialState) {
+-      window.emulator.serial0_send("clear; cat /etc/motd\n");
++      window.emulator.serial0_send(
++        "export TERM=xterm-256color; clear; cat /etc/motd\n");
+       // Nothing to do here: the saved state already contains an EMPTY 9p tree
+       // (persist-9p.js strips contents AND directory entries before saving), so
+       // /mnt/host lists nothing on restore. Deliberately no guest command is
+@@ -1261,8 +1271,24 @@ async function bootMachine() {
+     GoPersist.attach(window.emulator);
+ 
+     // v86 has now created the xterm instance; size it to the window.
++    watchShellPrompt();
+     fitSoon();
+   });
++  if (!initialState) {
++    // Cold boot: wait for the login shell, then set TERM and show the motd.
++    let coldTail = "";
++    const onCold = (byte) => {
++      coldTail = (coldTail + String.fromCharCode(byte)).slice(-400);
++      if (/root@golinux:~#\s*$/.test(coldTail.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
++            .replace(/\r/g, ""))) {
++        window.emulator.remove_listener("serial0-output-byte", onCold);
++        window.emulator.serial0_send(
++          "export TERM=xterm-256color; clear; cat /etc/motd\n");
++        fitSoon();
++      }
++    };
++    window.emulator.add_listener("serial0-output-byte", onCold);
++  }
+   window.emulator.add_listener("emulator-started", () => { statusEl.textContent = "running"; });
+   window.emulator.add_listener("emulator-stopped", () => { statusEl.textContent = "stopped"; });
+   window.emulator.add_listener("download-error", e => {
+@@ -1606,6 +1632,38 @@ let appliedRows = 0;
+ let resizeScheduled = false;
+ let lastResizeCommandAt = 0;
+ 
++/* Whether the shell is sitting at an empty prompt.
++ *
++ * Resizing needs to type into the guest, which is only safe when there is no
++ * half-written command line: sending "stty ..." while the user has typed
++ * "echo foo" appends to it and then runs it, and any attempt to clean up
++ * (Ctrl-U or Ctrl-L) loses what they typed. So while input is pending the
++ * emulator grid is resized but the guest tty is left alone, and the guest is
++ * told as soon as the line is submitted. */
++let shellAtPrompt = false;
++let resizePendingGuest = false;
++
++function watchShellPrompt() {
++  const term = currentTerminal();
++  if (!term || !window.emulator) return;
++  let tail = "";
++  window.emulator.add_listener("serial0-output-byte", (byte) => {
++    tail = (tail + String.fromCharCode(byte)).slice(-600);
++    const clean = tail
++      .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")   // CSI
++      .replace(/\x1b[()][A-Za-z0-9]/g, "")        // charset
++      .replace(/\r/g, "");
++    shellAtPrompt = /[#$]\s*$/.test(clean.trimEnd());
++    if (shellAtPrompt && resizePendingGuest) {
++      resizePendingGuest = false;
++      applyGrid(appliedCols, appliedRows, true);
++    }
++  });
++  // Typing marks the line dirty immediately, so a keypress between two serial
++  // reads cannot be mistaken for an idle prompt.
++  document.addEventListener("keydown", () => { shellAtPrompt = false; }, true);
++}
++
+ function currentTerminal() {
+   return window.emulator && window.emulator.serial_adapter &&
+          window.emulator.serial_adapter.term;
+@@ -1702,6 +1760,12 @@ function applyGrid(cols, rows, force) {
+   // emulator grid must track the box on every change, or rows get clipped when
+   // the viewport shrinks quickly (rotation, keyboard opening).
+   if (!window.emulator || !window.emulator.serial0_send) return;
++  if (!shellAtPrompt) {
++    // The user is mid-command (or a program is running). Keep the emulator grid
++    // in sync, but do not inject anything; retry when the prompt comes back.
++    resizePendingGuest = true;
++    return;
++  }
+   const since = Date.now() - lastResizeCommandAt;
+   if (since < 300) {
+     // Still tell the guest once the window closes, so it never keeps a stale
+diff --git a/tools/image/install.sh b/tools/image/install.sh
+index 77add00..230a738 100644
+--- a/tools/image/install.sh
++++ b/tools/image/install.sh
+@@ -57,9 +57,20 @@ rm -rf /var/lib/apt/lists/*
+ cat > /etc/inittab <<'EOF'
+ id:2:initdefault:
+ si::sysinit:/etc/init.d/rcS
+-T0:23:respawn:/sbin/getty -L ttyS0 115200 vt102 --autologin root
++T0:23:respawn:/sbin/getty -L ttyS0 115200 xterm-256color --autologin root
+ EOF
+ 
++# Full-screen programs (nano, vim, less) need an alternate screen so they do not
++# paint over the scrollback. getty already sets TERM for the console; this also
++# covers shells started from elsewhere (su, second sessions).
++cat > /etc/profile.d/term.sh <<'EOF'
++# Choose a terminal with smcup/rmcup when the image provides one.
++if [ -z "$TERM" ] || [ "$TERM" = "vt102" ] || [ "$TERM" = "vt100" ] || [ "$TERM" = "dumb" ]; then
++  command -v infocmp >/dev/null 2>&1 && infocmp xterm-256color >/dev/null 2>&1 && export TERM=xterm-256color
++fi
++EOF
++chmod 644 /etc/profile.d/term.sh
++
+ cat > /etc/fstab <<'EOF'
+ /dev/sda / ext4 rw,relatime 0 1
+ proc /proc proc defaults 0 0
+diff --git a/tools/test/smoke-deploy.test.js b/tools/test/smoke-deploy.test.js
+index 513547a..0ef71bb 100644
+--- a/tools/test/smoke-deploy.test.js
++++ b/tools/test/smoke-deploy.test.js
+@@ -372,7 +372,9 @@ async function runColdCompile(ctx) {
+     let last = "";
+     let seen = false, seenText = "";
+     const allSeen = [];
+-    for (let i = 0; i < 1800; i++) {
++    // 6000 x 100ms = 10 min: the asset origin is throttled to ~1 MB/s and a
++    // cold gcc compile pulls ~13 MB, so this legitimately takes minutes.
++    for (let i = 0; i < 6000; i++) {
+       const r = await cdp.send("Runtime.evaluate", {
+         expression: `JSON.stringify(window.__ind)`, returnByValue: true,
+       });
+@@ -397,6 +399,70 @@ async function runColdCompile(ctx) {
+       .filter((r) => /\/chunk-\d+-\d+\.zst$/.test(r.path)).length : 0;
+     out.stats = { ms: Date.now() - t0, chunkRequests: hits };
+ 
++    /* ---- TERM must support the alternate screen (nano/vim cleanliness) ---- */
++    {
++      const t = await cdp.send("Runtime.evaluate", {
++        expression: `(async () => {
++          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
++          window.__termRaw = "";
++          window.emulator.add_listener("serial0-output-byte",
++            (b) => { window.__termRaw += String.fromCharCode(b); });
++          window.emulator.serial0_send(
++            "echo T=$TERM; tput smcup >/dev/null 2>&1 && echo SMCUP=yes || echo SMCUP=no" +
++            String.fromCharCode(10));
++          await sleep(1500);
++          return JSON.stringify({ raw: window.__termRaw });
++        })()`, awaitPromise: true, returnByValue: true,
++      });
++      const raw = JSON.parse(t.result.value || "{}").raw || "";
++      const clean = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
++      check(/T=xterm-256color/.test(clean),
++        "guest TERM is xterm-256color (has an alternate screen), not vt102");
++      check(/SMCUP=yes/.test(clean),
++        "the guest can enter the alternate screen, so full-screen programs " +
++        "do not scribble on the scrollback");
++    }
++
++    /* ---- nano must leave no residue in the scrollback ---- */
++    {
++      const r = await cdp.send("Runtime.evaluate", {
++        expression: `(async () => {
++          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
++          const send = (s) => window.emulator.serial0_send(s);
++          const NL = String.fromCharCode(10);
++          const buf = window.emulator.serial_adapter.term.buffer.active;
++          const beforeBaseY = buf.baseY;
++          send("nano /root/nano-probe.txt" + NL);
++          await sleep(2500);
++          // Leave nano: Ctrl-X (nothing was typed, so no save prompt).
++          send(String.fromCharCode(24));
++          await sleep(2000);
++          const b = window.emulator.serial_adapter.term.buffer.active;
++          let nanoLines = 0;
++          for (let y = 0; y < b.length; y++) {
++            const l = b.getLine(y);
++            if (l && /GNU nano/.test(l.translateToString(true))) nanoLines++;
++          }
++          const vis = [];
++          for (let y = b.viewportY; y < b.viewportY + window.emulator
++                 .serial_adapter.term.rows; y++) {
++            const l = b.getLine(y);
++            const s2 = l ? l.translateToString(true) : "";
++            if (s2.trim()) vis.push(s2);
++          }
++          return JSON.stringify({ nanoLines, beforeBaseY, baseY: b.baseY,
++            tail: vis.slice(-3) });
++        })()`, awaitPromise: true, returnByValue: true,
++      });
++      const n = JSON.parse(r.result.value || "{}");
++      check(n.nanoLines === 0,
++        "after exiting nano no 'GNU nano' line is left in the buffer " +
++        "(found " + n.nanoLines + ")");
++      check(n.baseY === n.beforeBaseY,
++        "nano does not add scrollback lines (baseY " + n.beforeBaseY +
++        " -> " + n.baseY + "), so no stray scrollbar");
++    }
++
+     /* ---- tty resize: guest follows, and nothing is printed ---- */
+     {
+       const r = await cdp.send("Runtime.evaluate", {
+@@ -466,6 +532,94 @@ async function runColdCompile(ctx) {
+       await sleep(800);
+     }
+ 
++    /* ---- resizing must never eat a half-typed command ---- */
++    {
++      const r = await cdp.send("Runtime.evaluate", {
++        expression: `(async () => {
++          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
++          const send = (s) => window.emulator.serial0_send(s);
++          const NL = String.fromCharCode(10);
++
++          // Type a command WITHOUT pressing Enter, then resize.
++          send("echo TYPED_SURVIVES");
++          await sleep(400);
++          applyGrid(Math.max(20, appliedCols - 15), Math.max(5, appliedRows - 4));
++          await sleep(1200);
++
++          const t = window.emulator.serial_adapter.term;
++          const b = t.buffer.active;
++          const vis = [];
++          for (let y = b.viewportY; y < b.viewportY + t.rows; y++) {
++            const l = b.getLine(y);
++            const s2 = l ? l.translateToString(true) : "";
++            if (s2.trim()) vis.push(s2);
++          }
++          const lineShown = vis.some((l) => l.includes("TYPED_SURVIVES"));
++          const injected = vis.filter((l) => /stty (rows|echo|-echo)/.test(l));
++
++          // Now submit it: if the line survived, the command actually runs.
++          window.__typedRaw = "";
++          window.emulator.add_listener("serial0-output-byte",
++            (bb) => { window.__typedRaw += String.fromCharCode(bb); });
++          send(NL);
++          await sleep(1500);
++          const b2 = t.buffer.active;
++          const vis2 = [];
++          for (let y = b2.viewportY; y < b2.viewportY + t.rows; y++) {
++            const l = b2.getLine(y);
++            const s2 = l ? l.translateToString(true) : "";
++            if (s2.trim()) vis2.push(s2);
++          }
++          // Did the command actually RUN? Check the output stream rather than
++          // the screen: after a resize the result can scroll out of view, and
++          // the echoed command line looks identical to its own output.
++          const rawOut = window.__typedRaw || "";
++          // Avoid regex escapes inside this template literal: build the
++          // strings explicitly instead.
++          // Look for the word on a line of its own: bash echoes the command
++          // (which also contains the word), so a plain substring test would
++          // pass even if nothing ran.
++          // Normalise: drop CR, then remove complete CSI sequences
++          // (ESC [ ... final-byte). Done by hand because regex escapes inside
++          // this template literal are resolved before evaluation.
++          const LF = String.fromCharCode(10);
++          const CR = String.fromCharCode(13);
++          const ESC = String.fromCharCode(27);
++          let plain = "";
++          const chars = rawOut.split(CR).join("").split("");
++          for (let i = 0; i < chars.length; i++) {
++            if (chars[i] !== ESC) { plain += chars[i]; continue; }
++            if (chars[i + 1] === "[") {
++              i += 2;
++              while (i < chars.length && !/[A-Za-z]/.test(chars[i])) i++;
++            } else {
++              i += 1;
++            }
++          }
++          const ran = plain.split(LF)
++            .some((ln) => ln.trim() === "TYPED_SURVIVES");
++          return JSON.stringify({
++            lineShown, injected: injected.slice(0, 1), ran,
++            tail: vis.slice(-4),
++          });
++        })()`, awaitPromise: true, returnByValue: true,
++      });
++
++      if (r.exceptionDetails || !r.result || r.result.value === undefined) {
++        console.error("FAIL: typed-input probe threw:",
++          r.exceptionDetails ? r.exceptionDetails.exception.description :
++            JSON.stringify(r).slice(0, 200));
++      }
++      const d = JSON.parse(r.result.value || "{}");
++      check(d.injected && d.injected.length === 0,
++        "resizing does not inject stty text into the typed line" +
++        (d.injected.length ? ` (found: ${JSON.stringify(d.injected[0])})` : ""));
++      check(d.lineShown === true,
++        "a half-typed command is still on screen after a resize");
++      check(d.ran === true,
++        "and it still runs correctly when submitted");
++    }
++
+     /* ---- offline packs: exercise the real dialog logic in the page ---- */
+     const pack = await cdp.send("Runtime.evaluate", {
+       expression: `(async () => {

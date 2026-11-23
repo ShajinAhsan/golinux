@@ -1,0 +1,426 @@
+/* GoLinux layout & mobile-first terminal chrome.
+ *
+ * Key mobile invariants:
+ *   - html/body are fixed to the viewport with overscroll-behavior:none so iOS
+ *     Safari never rubber-bands or scrolls the outer page off-screen.
+ *   - #app height is driven by --app-h (synced to window.visualViewport) so
+ *     #keybar stays pinned directly above the iOS/Android soft keyboard.
+ *   - .xterm-helper-textarea uses font-size:16px to prevent iOS Safari
+ *     auto-zoom on focus.
+ *   - .xterm-viewport allows vertical touch scrolling (touch-action:pan-y).
+ *   - #diskToast floats inside #terminal with pointer-events:none so disk
+ *     loading activity never resizes #terminal or shifts layout.
+ */
+*, *::before, *::after { box-sizing: border-box; }
+
+:root {
+  --app-h: 100dvh;
+  --bg: #0b0d10;
+  --surface: #101317;
+  --btn: #171b20;
+  --border: #1d2126;
+  --border-hi: #2a3037;
+  --fg: #c7ccd1;
+  --fg-hi: #e8ecef;
+  --muted: #77828d;
+  --accent: #7ee787;
+  --warn: #f0c674;
+  --err: #ff8f8f;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: var(--app-h);
+  width: 100%;
+  max-width: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  will-change: transform;
+}
+
+/* ---------- toolbar ---------- */
+#bar {
+  position: relative;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  padding-top: max(6px, env(safe-area-inset-top));
+  padding-left: max(10px, env(safe-area-inset-left));
+  padding-right: max(10px, env(safe-area-inset-right));
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+#bar b {
+  color: var(--fg-hi);
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+#status {
+  color: var(--muted);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#persistStatus {
+  font-size: 12px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 38vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+#persistStatus.ok { color: var(--accent); }
+#persistStatus.warn { color: var(--warn); }
+#persistStatus.error { color: var(--err); }
+
+#barActions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex: 0 0 auto;
+}
+#barMenuBtn { display: none; }
+
+button {
+  background: var(--btn);
+  color: var(--fg);
+  border: 1px solid var(--border-hi);
+  border-radius: 5px;
+  padding: 4px 9px;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover { border-color: #3d454e; }
+button:disabled { opacity: 0.45; cursor: default; }
+
+a.nav-link {
+  color: #8b95a1;
+  font-size: 12px;
+  text-decoration: none;
+  padding: 4px 4px;
+}
+a.nav-link:hover { color: var(--fg-hi); }
+
+[hidden] { display: none !important; }
+
+/* ---------- terminal ---------- */
+#terminal {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  padding: 6px 8px;
+  padding-left: max(8px, env(safe-area-inset-left));
+  padding-right: max(8px, env(safe-area-inset-right));
+  overflow: hidden;
+  position: relative;
+  background: var(--bg);
+}
+#terminal .xterm {
+  height: 100%;
+  width: 100%;
+}
+#terminal .xterm-viewport {
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+}
+#terminal, #terminal * { -webkit-touch-callout: none; }
+
+/* 16px prevents iOS Safari auto-zoom on focus; fixed top-left prevents page scroll. */
+#terminal .xterm-helper-textarea {
+  position: fixed !important;
+  opacity: 0 !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: 1px !important;
+  height: 1px !important;
+  font-size: 16px !important;
+  caret-color: transparent !important;
+}
+
+/* Floating disk-loading toast: NEVER shifts #terminal height or clears output. */
+#diskToast {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 4;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(16, 19, 23, 0.92);
+  border: 1px solid #262c33;
+  color: var(--accent);
+  font-size: 11px;
+  pointer-events: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+#diskToast.visible { display: inline-flex; }
+#diskToast .disk-sub { color: #8b95a1; }
+
+/* ---------- progress & banners ---------- */
+.bar {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex: 0 0 auto;
+}
+.bar.visible { display: flex; }
+.bar .label { color: #8b95a1; white-space: nowrap; }
+.bar .track {
+  flex: 1;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 80px;
+}
+.bar .fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.15s linear;
+}
+.bar .pct { color: var(--accent); min-width: 7em; text-align: right; font-size: 12px; }
+
+#offlineBanner {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  background: #3a2a10;
+  border-bottom: 1px solid #6b4d16;
+  color: var(--warn);
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+#offlineBanner.visible { display: flex; }
+#offlineBanner .grow { flex: 1; min-width: 0; }
+#offlineBanner button { padding: 3px 8px; font-size: 12px; }
+
+/* ---------- packs dialog (when GL_FEATURES.packs enabled) ---------- */
+#packs {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 7, 9, 0.72);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 30;
+}
+#packs.visible { display: flex; }
+#packsBox {
+  background: var(--surface);
+  border: 1px solid #262c33;
+  border-radius: 8px;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - 64px);
+  overflow: auto;
+  padding: 16px 18px 14px;
+}
+#packsBox h2 { margin: 0 0 4px; font-size: 14px; color: var(--fg-hi); }
+#packsBox p.hint { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+.pack {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid #222830;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.pack.installed { border-color: #2d6a3a; background: #0f1613; }
+.pack .meta { flex: 1; min-width: 0; }
+.pack .meta strong { color: #dfe5ea; }
+.pack .meta .size { color: var(--accent); margin-left: 6px; }
+.pack .meta .desc { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.pack .meta .badge { color: var(--accent); font-size: 11px; margin-left: 6px; }
+.pack .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+#packStatus { margin-top: 10px; font-size: 12px; color: #8b95a1; min-height: 1.2em; }
+#packsFooter { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; gap: 8px; }
+#saveDataNote { font-size: 12px; color: #d0a24a; margin: 0 0 10px; display: none; }
+#saveDataNote.visible { display: block; }
+
+/* ---------- loading & fatal overlays ---------- */
+#loading {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  color: #8b95a1;
+  padding: 24px;
+  text-align: center;
+}
+#loading.visible { display: flex; }
+#loading .title { color: #dfe5ea; font-size: 14px; }
+#loading .detail { font-size: 12px; max-width: 420px; line-height: 1.5; }
+#loading .spin {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid #262c33;
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#fatal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(5, 7, 9, 0.94);
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+#fatal.visible { display: flex; }
+#fatal .box {
+  max-width: 520px;
+  border: 1px solid #6b3030;
+  border-radius: 8px;
+  background: #150d0d;
+  padding: 20px 22px;
+}
+#fatal .fatal-title { color: #ff9f9f; font-weight: 600; margin-bottom: 8px; }
+#fatal .fatal-detail { color: var(--fg); line-height: 1.5; font-size: 13px; }
+#fatal .fatal-hint { color: var(--muted); font-size: 12px; margin-top: 12px; }
+#fatal .fatal-actions { margin-top: 14px; display: flex; gap: 8px; }
+#fatalReload {
+  background: #233827;
+  border-color: #2d6a3a;
+  color: var(--accent);
+  min-height: 38px;
+  padding: 6px 14px;
+}
+
+/* ---------- overflow menu (narrow screens) ---------- */
+#barMenu {
+  position: absolute;
+  right: 8px;
+  top: calc(100% - 2px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface);
+  border: 1px solid #262c33;
+  border-radius: 8px;
+  padding: 6px;
+  z-index: 25;
+  min-width: 190px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+}
+#barMenu button, #barMenu a {
+  text-align: left;
+  padding: 10px 12px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font: inherit;
+  text-decoration: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+#barMenu button:hover, #barMenu a:hover { background: var(--btn); }
+
+/* ---------- on-screen terminal keys (touch devices) ---------- */
+#keybar {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  padding: 5px 6px;
+  padding-bottom: max(5px, env(safe-area-inset-bottom));
+  padding-left: max(6px, env(safe-area-inset-left));
+  padding-right: max(6px, env(safe-area-inset-right));
+  border-top: 1px solid var(--border);
+  background: #0e1114;
+  flex: 0 0 auto;
+}
+#keybar.visible { display: flex; }
+#keybar .kb-row { display: flex; gap: 4px; }
+#keybar button {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 4px;
+  font-size: 13px;
+  background: var(--btn);
+  color: var(--fg);
+  border: 1px solid var(--border-hi);
+  border-radius: 6px;
+  white-space: nowrap;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#keybar button:active { background: #22282f; border-color: #3d454e; }
+#keybar button[aria-pressed="true"] {
+  background: #1d3a24;
+  border-color: #2d6a3a;
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px #2d6a3a;
+}
+
+@media (max-width: 760px) {
+  #bar { padding: 4px 8px; padding-top: max(4px, env(safe-area-inset-top)); font-size: 12px; gap: 6px; }
+  #bar b { font-size: 12px; }
+  #persistStatus { max-width: 30vw; font-size: 11px; }
+  #barActions { gap: 4px; }
+  .wide-only { display: none !important; }
+  #barMenuBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 40px;
+    min-height: 40px;
+    font-size: 16px;
+    line-height: 1;
+  }
+  #restart { min-height: 40px; padding: 0 10px; }
+  #terminal { padding: 4px 6px; }
+}
+
+@media (max-height: 440px) {
+  #keybar button { min-height: 36px; font-size: 12px; }
+  #bar { padding: 3px 6px; }
+  #barMenuBtn, #restart { min-height: 34px; }
+}

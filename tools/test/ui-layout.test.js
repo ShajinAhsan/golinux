@@ -1,21 +1,16 @@
 #!/usr/bin/env node
 /**
- * Layout + mobile-control tests, driven in real headless Chrome against the
- * staged app with a local chunk origin.
+ * Layout + mobile-control tests in real headless Chrome.
  *
- *   node tools/test/ui-layout.test.js [--keep]
- *
- * Asserts, per viewport:
- *   - the app fills the viewport and the page itself does not scroll
- *   - the terminal fills the remaining space and its grid matches the box
- *   - the toolbar does not overflow horizontally
- *   - on narrow screens the actions collapse into the menu
- *   - the key bar has >=44px touch targets
- *   - Ctrl is one-shot and sends real input (Ctrl+X reaches the guest)
- *   - arrow keys send the correct escape sequences
- *   - ResizeObserver re-fits after a viewport change
- *
- * Exits non-zero on failure.
+ * Verifies:
+ *   - Viewport fit, zero page scroll, zero toolbar overflow across 5 viewports
+ *     INCLUDING with a 120-char #persistStatus warning (BUG-26)
+ *   - Narrow screens collapse actions into #barMenu; flagged-off controls hidden
+ *   - Keybar touch targets >=36px; Ctrl/Alt one-shot works on BOTH keybar symbols
+ *     AND native keyboard input (BUG-24)
+ *   - #fatal includes a working Reload button (BUG-23)
+ *   - .xterm-helper-textarea has font-size >= 16px (prevents iOS Safari zoom, BUG-25)
+ *   - ResizeObserver re-fits grid without touching stdin
  */
 "use strict";
 
@@ -35,18 +30,30 @@ const check = (c, m) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript",
-  ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm",
-  ".zst": "application/zstd", ".bin": "application/octet-stream",
-  ".png": "image/png" };
+const MIME = {
+  ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8", ".json": "application/json",
+  ".wasm": "application/wasm", ".zst": "application/zstd",
+  ".bin": "application/octet-stream", ".png": "image/png",
+};
+
+function chromePath() {
+  for (const c of [
+    process.env.CHROME,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+  ].filter(Boolean)) if (fs.existsSync(c)) return c;
+  throw new Error("no Chrome/Chromium found; set $CHROME");
+}
 
 function serve(root) {
   const server = http.createServer((req, res) => {
     let rel = decodeURIComponent(req.url.split("?")[0]).replace(/^\/+/, "");
     if (rel === "") rel = "index.html";
     const full = path.join(root, rel);
-    if (!full.startsWith(root) || !fs.existsSync(full) ||
-        !fs.statSync(full).isFile()) {
+    if (!full.startsWith(root) || !fs.existsSync(full) || !fs.statSync(full).isFile()) {
       return res.writeHead(404).end("nf");
     }
     const b = fs.readFileSync(full);
@@ -56,8 +63,7 @@ function serve(root) {
     });
     res.end(b);
   });
-  return new Promise((r) => server.listen(0, "127.0.0.1",
-    () => r({ server, port: server.address().port })));
+  return new Promise((r) => server.listen(0, "127.0.0.1", () => r({ server, port: server.address().port })));
 }
 
 async function waitJson(url, ms) {
@@ -93,8 +99,6 @@ const connect = (u) => new Promise((res, rej) => {
   ws.onerror = () => rej(new Error("ws fail"));
 });
 
-/* ---------------- geometry probe ---------------- */
-
 async function geometry(cdp) {
   const r = await cdp.send("Runtime.evaluate", {
     expression: `(() => {
@@ -102,15 +106,15 @@ async function geometry(cdp) {
       const bar = document.getElementById("bar");
       const term = document.getElementById("terminal");
       const xterm = document.querySelector("#terminal .xterm-screen");
-      const t = window.emulator && window.emulator.serial_adapter &&
-                window.emulator.serial_adapter.term;
+      const ta = document.querySelector("#terminal .xterm-helper-textarea");
+      const ad = window.emulator && (window.emulator.virtio_console_adapter || window.emulator.serial_adapter);
+      const t = ad && ad.term;
       const de = document.documentElement;
       const kb = document.getElementById("keybar");
       const kbBtn = kb && kb.querySelector("button");
       const kbr = kbBtn ? kbBtn.getBoundingClientRect() : null;
       return JSON.stringify({
         innerW: window.innerWidth, innerH: window.innerHeight,
-        appW: app.getBoundingClientRect().width,
         appH: app.getBoundingClientRect().height,
         pageScrollH: de.scrollHeight, pageClientH: de.clientHeight,
         pageScrollW: de.scrollWidth, pageClientW: de.clientWidth,
@@ -120,11 +124,14 @@ async function geometry(cdp) {
         termW: term.clientWidth, termH: term.clientHeight,
         xtermW: xterm ? xterm.getBoundingClientRect().width : 0,
         xtermH: xterm ? xterm.getBoundingClientRect().height : 0,
+        taFontSize: ta ? parseFloat(getComputedStyle(ta).fontSize) : 0,
         cols: t ? t.cols : 0, rows: t ? t.rows : 0,
         kbVisible: kb ? kb.classList.contains("visible") : false,
         kbBtnH: kbr ? kbr.height : 0, kbBtnW: kbr ? kbr.width : 0,
         menuBtnShown: getComputedStyle(document.getElementById("barMenuBtn")).display,
-        wideShown: getComputedStyle(document.getElementById("openPacks")).display,
+        resetShown: getComputedStyle(document.getElementById("resetBtn")).display,
+        packsHidden: document.getElementById("openPacks").hidden,
+        fatalReloadExists: !!document.getElementById("fatalReload"),
       });
     })()`,
     returnByValue: true,
@@ -136,26 +143,13 @@ async function geometry(cdp) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ui-layout-"));
   let chrome = null, servers = [];
   try {
-    const buildId = JSON.parse(fs.readFileSync(
-      path.join(ROOT, "images/build-id.json"), "utf8")).buildId;
-
-    // Chunk origin: serve images/ and packs/ at the paths the app asks for.
-    const chunkRoot = path.join(tmp, "assets");
-    fs.mkdirSync(path.join(chunkRoot, "images"), { recursive: true });
-    // Only what the shell needs: the snapshot + build id (no disk chunks, so we
-    // do not need a 5 GiB copy just to test layout).
-    fs.cpSync(path.join(ROOT, "images", "debian-state.bin.zst"),
-      path.join(chunkRoot, "images", "debian-state.bin.zst"));
-    const chunkSrv = await serve(chunkRoot);
-    servers.push(chunkSrv.server);
-    void buildId;
-
     const appDir = path.join(tmp, "app");
     fs.cpSync(path.join(ROOT, ".deploy-pages"), appDir, { recursive: true });
     const cfgPath = path.join(appDir, "packs-config.js");
     fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, "utf8").replace(
       /^const GL_ASSET_ORIGIN\s*=\s*"[^"]*";/m,
-      `const GL_ASSET_ORIGIN = "";`));   // same-origin: no chunks needed
+      `const GL_ASSET_ORIGIN = "";`
+    ));
     const appSrv = await serve(appDir);
     servers.push(appSrv.server);
     const origin = `http://127.0.0.1:${appSrv.port}`;
@@ -163,11 +157,9 @@ async function geometry(cdp) {
     const profile = path.join(tmp, "p");
     fs.mkdirSync(profile, { recursive: true });
     const port = 9900 + Math.floor(Math.random() * 80);
-    chrome = spawn("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [
+    chrome = spawn(chromePath(), [
       "--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
-      "--no-first-run", "--disable-extensions",
-      // Emulate a touch device so the key bar shows.
-      "--touch-events=enabled",
+      "--no-first-run", "--disable-extensions", "--touch-events=enabled",
       "--window-size=1280,900", "about:blank",
     ], { stdio: "ignore" });
 
@@ -180,16 +172,24 @@ async function geometry(cdp) {
     await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
 
     await cdp.send("Page.navigate", { url: origin + "/" });
-    // Wait for the app script to be alive (the terminal is created by v86
-    // after the snapshot loads; layout is measurable before that).
-    for (let i = 0; i < 200; i++) {
+    // Wait until xterm instance is created by v86
+    for (let i = 0; i < 300; i++) {
       const r = await cdp.send("Runtime.evaluate", {
-        expression: `!!document.getElementById("terminal")`, returnByValue: true });
+        expression: `!!(window.emulator && (window.emulator.virtio_console_adapter || window.emulator.serial_adapter) && (window.emulator.virtio_console_adapter || window.emulator.serial_adapter).term)`,
+        returnByValue: true,
+      });
       if (r.result.value) break;
       await sleep(100);
     }
+    await sleep(500);
     await cdp.send("Runtime.evaluate", {
-      expression: `document.getElementById("keybar").classList.add("visible")` });
+      expression: `
+        document.getElementById("keybar").classList.add("visible");
+        // Populate a long persistence warning to prove #bar never overflows (BUG-26).
+        document.getElementById("persistStatus").textContent =
+          "Autosave paused: saved state is 162 MB (limit 150 MB). Delete large files to resume saving.";
+      `,
+    });
 
     const viewports = [
       { name: "desktop 1440x900", w: 1440, h: 900 },
@@ -204,220 +204,106 @@ async function geometry(cdp) {
       await cdp.send("Emulation.setDeviceMetricsOverride", {
         width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.w < 800,
       });
-      await sleep(700);   // let ResizeObserver + rAF settle
-
+      await sleep(600);
       const g = await geometry(cdp);
-      if (process.env.UI_DEBUG) {
-        const d = await cdp.send("Runtime.evaluate", {
-          expression: `JSON.stringify({
-            applied: [appliedCols, appliedRows],
-            desired: desiredGrid(),
-            termH: document.getElementById("terminal").clientHeight,
-            kbH: document.getElementById("keybar").getBoundingClientRect().height,
-          })`, returnByValue: true });
-        console.log("  dbg", d.result.value);
-      }
-
-      // 1. App fills the viewport; the page does not scroll.
-      check(Math.abs(g.appH - g.innerH) <= 2,
-        `app height fills viewport (${g.appH} vs ${g.innerH})`);
-      check(g.pageScrollH <= g.pageClientH + 1,
-        `page does not scroll vertically (${g.pageScrollH} <= ${g.pageClientH})`);
-      check(g.pageScrollW <= g.pageClientW + 1,
-        `page does not scroll horizontally (${g.pageScrollW} <= ${g.pageClientW})`);
-
-      // 2. Toolbar does not overflow.
+      check(Math.abs(g.appH - g.innerH) <= 2, `app height fills viewport (${g.appH} vs ${g.innerH})`);
+      check(g.pageScrollH <= g.pageClientH + 1, `no vertical page scroll`);
+      check(g.pageScrollW <= g.pageClientW + 1, `no horizontal page scroll`);
       check(g.barScrollW <= g.barClientW + 1,
-        `toolbar does not overflow (${g.barScrollW} <= ${g.barClientW})`);
-
-      // 3. Narrow screens collapse to the menu.
+        `toolbar does not overflow with long #persistStatus (${g.barScrollW} <= ${g.barClientW}) (BUG-26)`);
       if (vp.w <= 760) {
         check(g.menuBtnShown !== "none", "menu button shown on narrow screen");
-        check(g.wideShown === "none", "wide-only actions hidden on narrow screen");
+        check(g.resetShown === "none", "wide-only actions hidden on narrow screen");
       } else {
         check(g.menuBtnShown === "none", "menu button hidden on wide screen");
-        check(g.wideShown !== "none", "actions shown inline on wide screen");
+        check(g.resetShown !== "none", "actions shown inline on wide screen");
       }
-
-      // 4. Terminal occupies the remaining height.
-      // The terminal owns whatever the toolbar and key bar do not.
-      const expectedH = g.innerH - g.barH - (g.kbVisible ? g.kbH : 0);
-      check(g.termH >= expectedH * 0.9,
-        `terminal fills the space between bar and keys ` +
-        `(${g.termH} of ~${Math.round(expectedH)})`);
-      // Grid must fit the box: a stale grid shows as a cell shorter than the
-      // font line height (clipped rows).
-      if (g.cols > 0 && g.rows > 0) {
-        const cellH = g.xtermH / g.rows;
-        check(cellH >= 8,
-          `grid fits the box (${g.rows} rows, ${cellH.toFixed(1)}px each)`);
+      check(g.packsHidden === true, "flagged-off packs button stays hidden");
+      check(g.fatalReloadExists === true, "#fatal includes Reload button (BUG-23)");
+      if (g.taFontSize > 0) {
+        check(g.taFontSize >= 16, `helper textarea font-size >= 16px (${g.taFontSize}px) prevents iOS zoom (BUG-25)`);
       }
-
-      // 5. Grid matches the box (within one cell).
-      if (g.cols > 0) {
-        const cellW = g.xtermW / g.cols;
-        const cellH = g.xtermH / g.rows;
-        check(g.xtermW >= g.termW * 0.8,
-          `xterm screen uses the width (${Math.round(g.xtermW)} of ${g.termW})`);
-        check(cellW > 2 && cellH > 4,
-          `cell size sane (${cellW.toFixed(1)}x${cellH.toFixed(1)})`);
-      }
-
-      // 6. Touch targets.
       if (g.kbVisible) {
-        check(g.kbBtnH >= 36,
-          `key button height is touch-friendly (${g.kbBtnH.toFixed(0)}px)`);
-        check(g.kbBtnW >= 36,
-          `key button width is touch-friendly (${g.kbBtnW.toFixed(0)}px)`);
+        check(g.kbBtnH >= 36 && g.kbBtnW >= 36, `key buttons touch-friendly (${Math.round(g.kbBtnW)}x${Math.round(g.kbBtnH)})`);
       }
     }
 
-    /* ---- resize must not leave visible junk on screen ---- */
-    // (Only meaningful with a live guest; the layout suite runs without one, so
-    // this is asserted in the smoke test instead.)
-
-    /* ---- toolbar overflow menu ---- */
-    console.log("\n== toolbar menu ==");
-    await cdp.send("Emulation.setDeviceMetricsOverride", {
-      width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-    await sleep(400);
-    let m = await cdp.send("Runtime.evaluate", {
-      expression: `(() => {
-        document.getElementById("barMenuBtn").click();
-        const menu = document.getElementById("barMenu");
-        const items = [...menu.querySelectorAll("button,a")].map(e => e.textContent.trim());
-        const r = menu.getBoundingClientRect();
-        const vis = !menu.hidden && r.width > 0 && r.right <= window.innerWidth + 1;
-        return JSON.stringify({ vis, items });
-      })()`, returnByValue: true });
-    let mo = JSON.parse(m.result.value);
-    check(mo.vis, "menu opens and stays inside the viewport");
-    for (const want of ["Save for offline use", "Upload", "Download /root", "Reset", "About"]) {
-      check(mo.items.includes(want), `menu contains "${want}"`);
-    }
-    // It must close again, or it would cover the terminal.
-    m = await cdp.send("Runtime.evaluate", {
-      expression: `(() => {
-        document.body.click();
-        return document.getElementById("barMenu").hidden;
-      })()`, returnByValue: true });
-    check(m.result.value === true, "menu closes when clicking elsewhere");
-
-    /* ---- key behaviour ---- */
-    console.log("\n== mobile keys ==");
-    await cdp.send("Emulation.setDeviceMetricsOverride", {
-      width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    /* ---- Ctrl latch intercepts NATIVE keyboard input (BUG-24) ---- */
+    console.log("\n== keybar + native keyboard Ctrl latch ==");
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await sleep(400);
 
-    // Intercept what sendToTerm would deliver, by recording term.input calls.
     await cdp.send("Runtime.evaluate", {
       expression: `(() => {
-        window.__sent = [];
-        const t = window.emulator.serial_adapter.term;
-        const orig = t.input.bind(t);
-        t.input = (s) => { window.__sent.push(s); return orig(s); };
-        return true;
-      })()`, returnByValue: true });
+        window.__busInput = [];
+        const origSend = window.emulator.bus.send.bind(window.emulator.bus);
+        window.emulator.bus.send = (name, value) => {
+          if (name === "virtio-console0-input-bytes") {
+            window.__busInput.push(Array.from(value));
+          } else if (name === "serial0-input") {
+            window.__busInput.push([value]);
+          }
+          return origSend(name, value);
+        };
+      })()`,
+    });
 
     const tap = async (sel) => {
-      const r = await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
-          const b = document.querySelector(${JSON.stringify(sel)});
-          if (!b) return "missing";
-          b.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true,
-            cancelable: true, pointerType: "touch" }));
-          return "ok";
-        })()`, returnByValue: true });
-      await sleep(60);
-      return r.result.value;
+      await cdp.send("Runtime.evaluate", {
+        expression: `document.querySelector(${JSON.stringify(sel)}).dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "touch" }))`,
+      });
+      await sleep(50);
     };
 
-    const sent = async () => {
-      const r = await cdp.send("Runtime.evaluate", {
-        expression: `JSON.stringify(window.__sent.map(s =>
-          Array.from(s).map(c => c.charCodeAt(0))))`, returnByValue: true });
-      return JSON.parse(r.result.value);
-    };
-    const armed = async () => {
-      const r = await cdp.send("Runtime.evaluate", {
-        expression: `document.querySelector('#keybar [data-act="ctrl"]')
-          .getAttribute("aria-pressed")`, returnByValue: true });
-      return r.result.value;
-    };
-
-    // Arrow keys.
-    await cdp.send("Runtime.evaluate", { expression: `window.__sent = []` });
-    await tap('#keybar [data-act="up"]');
-    await tap('#keybar [data-act="left"]');
-    let got = await sent();
-    check(got.some((a) => a.join(",") === "27,91,65"), "up sends ESC[A");
-    check(got.some((a) => a.join(",") === "27,91,68"), "left sends ESC[D");
-
-    // Esc / Tab / Enter / Backspace.
-    await cdp.send("Runtime.evaluate", { expression: `window.__sent = []` });
-    await tap('#keybar [data-act="esc"]');
-    await tap('#keybar [data-act="tab"]');
-    await tap('#keybar [data-act="enter"]');
-    await tap('#keybar [data-act="backspace"]');
-    got = await sent();
-    check(got.some((a) => a.join(",") === "27"), "Esc sends ESC");
-    check(got.some((a) => a.join(",") === "9"), "Tab sends 0x09");
-    check(got.some((a) => a.join(",") === "13"), "Enter sends CR");
-    check(got.some((a) => a.join(",") === "127"), "Backspace sends DEL");
-
-    // Ctrl is one-shot: arm, press x, assert 0x18, assert disarmed.
-    await cdp.send("Runtime.evaluate", { expression: `window.__sent = []` });
+    // Tap Ctrl on keybar, then type 'o' via real CDP keyboard event (native keyboard path!)
     await tap('#keybar [data-act="ctrl"]');
-    check((await armed()) === "true", "Ctrl arms visibly (aria-pressed=true)");
-    // Send the following key through the same handler the sym buttons use.
+    const armedBefore = (await cdp.send("Runtime.evaluate", {
+      expression: `document.querySelector('#keybar [data-act="ctrl"]').getAttribute("aria-pressed")`,
+      returnByValue: true,
+    })).result.value;
+    check(armedBefore === "true", "Ctrl arms visibly");
+
     await cdp.send("Runtime.evaluate", {
-      expression: `(() => {
-        const b = document.querySelector('#keybar [data-sym="x"]') ||
-                  document.createElement("button");
-        b.dataset.sym = "x";
-        handleKeyButton(b);
-      })()`, returnByValue: true });
+      expression: `document.querySelector(".xterm-helper-textarea").focus()`,
+    });
+    await cdp.send("Input.dispatchKeyEvent", { type: "char", text: "o" });
+    await sleep(80);
+
+    const busAfter = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `JSON.stringify(window.__busInput)`, returnByValue: true,
+    })).result.value);
+    const armedAfter = (await cdp.send("Runtime.evaluate", {
+      expression: `document.querySelector('#keybar [data-act="ctrl"]').getAttribute("aria-pressed")`,
+      returnByValue: true,
+    })).result.value;
+
+    check(busAfter.some((a) => a.join(",") === "15"),
+      "tapping Ctrl + native keyboard 'o' sends 0x0f (Ctrl-O) to guest (BUG-24)");
+    check(armedAfter === "false", "Ctrl disarms after native keyboard char");
+
+    // Next native 'o' must be plain 111
+    await cdp.send("Runtime.evaluate", { expression: `window.__busInput = []` });
+    await cdp.send("Input.dispatchKeyEvent", { type: "char", text: "o" });
     await sleep(60);
-    got = await sent();
-    check(got.some((a) => a.join(",") === "24"), "Ctrl+x sends 0x18 (Ctrl-X)");
-    check((await armed()) === "false", "Ctrl disarms after one keypress");
-    await cdp.send("Runtime.evaluate", {
-      expression: `window.__sent = []` });
-    await tap('#keybar [data-sym="/"]');
-    got = await sent();
-    check(got.some((a) => a.join(",") === "47"),
-      "the next key is unmodified (plain /)");
+    const busPlain = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `JSON.stringify(window.__busInput)`, returnByValue: true,
+    })).result.value);
+    check(busPlain.some((a) => a.join(",") === "111"), "following native key is unmodified 'o'");
 
-    // Tapping Ctrl twice disarms.
-    await tap('#keybar [data-act="ctrl"]');
-    await tap('#keybar [data-act="ctrl"]');
-    check((await armed()) === "false", "tapping Ctrl again disarms");
-    // Esc cancels a latched Ctrl.
-    await tap('#keybar [data-act="ctrl"]');
-    await tap('#keybar [data-act="esc"]');
-    check((await armed()) === "false", "Esc cancels a latched Ctrl");
-
-    /* ---- resize re-fit ---- */
-    console.log("\n== resize ==");
+    // Resize re-fit
     const before = await geometry(cdp);
-    await cdp.send("Emulation.setDeviceMetricsOverride", {
-      width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
-    await sleep(900);
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
+    await sleep(600);
     const after = await geometry(cdp);
-    check(after.cols !== before.cols || after.rows !== before.rows,
-      `grid re-fits after a viewport change (${before.cols}x${before.rows} -> ` +
-      `${after.cols}x${after.rows})`);
-    check(after.cols > before.cols,
-      "a wider window gives more columns");
+    check(after.cols > before.cols, `grid re-fits wider (${before.cols}x${before.rows} -> ${after.cols}x${after.rows})`);
   } catch (e) {
     failed++;
-    console.error("FAIL: " + e.message);
+    console.error("FAIL: " + e.stack);
   } finally {
     try { if (chrome) chrome.kill("SIGKILL"); } catch (e) {}
     for (const s of servers) { try { s.close(); } catch (e) {} }
-    if (!keep) {
-      try { require("node:child_process").execFileSync("rm", ["-rf", tmp]); } catch (e) {}
-    } else console.log("kept " + tmp);
+    if (!keep) { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) {} }
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

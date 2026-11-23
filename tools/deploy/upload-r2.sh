@@ -68,21 +68,56 @@ export AWS_DEFAULT_REGION=auto
 
 ENDPOINT="https://${R2_ACCOUNT_ID:-<account-id>}.r2.cloudflarestorage.com"
 
+# Build id: every upload goes under its own prefix, so a build's URLs are
+# immutable and older builds stay intact for clients still on them.
+BUILD_ID="$BUILD_ID_ARG"
+if [ -z "$BUILD_ID" ]; then
+  if [ ! -f "$ROOT/images/build-id.json" ]; then
+    echo "ERROR: missing images/build-id.json and no build id argument." >&2
+    echo "       Refusing to upload to flat, unversioned chunk paths." >&2
+    echo "       Run: node tools/image/build-id.js  (after build.sh)" >&2
+    exit 1
+  fi
+  BUILD_ID="$(node -e 'process.stdout.write(require(process.argv[1]).buildId || "")' "$ROOT/images/build-id.json")"
+fi
+if [ -z "$BUILD_ID" ]; then
+  echo "ERROR: build id is empty — refusing to upload flat, unversioned chunk paths." >&2
+  exit 1
+fi
+case "$BUILD_ID" in
+  *[!0-9a-f]*) echo "invalid build id: '$BUILD_ID' (expected lowercase hex)" >&2; exit 1 ;;
+esac
+echo "build id: $BUILD_ID"
+
+# Verify manifests agree with artifacts before uploading anything.
+node "$ROOT/tools/image/verify-manifests.js"
+
+# Stage from the per-build directory if present (single source for this build),
+# falling back to flat chunks only if no per-build dir exists.
+SRC_CHUNKS="$CHUNKS/$BUILD_ID"
+if [ ! -d "$SRC_CHUNKS" ]; then
+  echo "ERROR: expected per-build chunk directory $SRC_CHUNKS does not exist." >&2
+  exit 1
+fi
+MANIFEST="$SRC_CHUNKS/manifest.json"
+[ -f "$MANIFEST" ] || MANIFEST="$CHUNKS/manifest.json"
+
 echo "== Staging the files that should exist in R2 =="
 rm -rf "$STAGE"
 mkdir -p "$STAGE/images/debian-chunks" "$STAGE/packs"
 
-python3 - "$MANIFEST" "$CHUNKS" "$STAGE" <<'PY'
+python3 - "$MANIFEST" "$SRC_CHUNKS" "$CHUNKS" "$STAGE" <<'PY'
 import json, os, shutil, sys
-manifest, chunks, stage = sys.argv[1], sys.argv[2], sys.argv[3]
+manifest, src_chunks, flat_chunks, stage = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 real = json.load(open(manifest))["real"]
 dst = os.path.join(stage, "images", "debian-chunks")
 for name in real:
-    shutil.copy2(os.path.join(chunks, name), os.path.join(dst, name))
-# The zeroed chunk is needed by the service worker's 404 fallback.
-shutil.copy2(os.path.join(chunks, "empty-chunk.zst"),
-             os.path.join(dst, "empty-chunk.zst"))
-print(f"staged {len(real) + 1} chunk files")
+    shutil.copy2(os.path.join(src_chunks, name), os.path.join(dst, name))
+tpl = os.path.join(src_chunks, "empty-chunk.zst")
+if not os.path.exists(tpl):
+    tpl = os.path.join(flat_chunks, "empty-chunk.zst")
+shutil.copy2(tpl, os.path.join(dst, "empty-chunk.zst"))
+print(f"staged {len(real) + 1} chunk files from {src_chunks}")
 PY
 
 cp "$PACKS"/*.json "$STAGE/packs/"
@@ -97,31 +132,6 @@ echo "  chunks: $CHUNK_COUNT files, ~$((CHUNK_BYTES / 1024)) MB"
 aws_flags=(
   --endpoint-url "$ENDPOINT"
 )
-
-# Build id: every upload goes under its own prefix, so a build's URLs are
-# immutable and older builds stay intact for clients still on them.
-BUILD_ID="$BUILD_ID_ARG"
-if [ -z "$BUILD_ID" ]; then
-  if [ ! -f "$ROOT/images/build-id.json" ]; then
-    echo "ERROR: missing images/build-id.json and no build id argument." >&2
-    echo "       Refusing to upload to flat, unversioned chunk paths." >&2
-    echo "       Run: node tools/image/build-id.js  (after build.sh)" >&2
-    exit 1
-  fi
-  BUILD_ID="$(node -e 'process.stdout.write(require(process.argv[1]).buildId || "")' "$ROOT/images/build-id.json")"
-fi
-# A production upload MUST be versioned. An empty GL_BUILD_ID-style id would put
-# every build's chunks at the same unversioned prefix, so a rebuild silently
-# overwrites bytes that `immutable` promised never to change. Refuse it.
-if [ -z "$BUILD_ID" ]; then
-  echo "ERROR: build id is empty — refusing to upload flat, unversioned chunk paths." >&2
-  echo "       images/build-id.json has an empty buildId. Run: node tools/image/build-id.js" >&2
-  exit 1
-fi
-case "$BUILD_ID" in
-  *[!0-9a-f]*) echo "invalid build id: '$BUILD_ID' (expected lowercase hex)" >&2; exit 1 ;;
-esac
-echo "build id: $BUILD_ID"
 
 if [ "$DRY_RUN" -eq 1 ] && ! command -v aws >/dev/null; then
   echo

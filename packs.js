@@ -1,22 +1,16 @@
 /* Offline pack store.
  *
- * Three packs: minimal (nothing but the shipped snapshot), common and full.
- *
- * Design rules, which the old version broke:
- *   1. THE CACHE IS THE SOURCE OF TRUTH. There is no "installed tier" flag;
- *      every pack's state is computed from which of its chunks are actually in
- *      GL_PACK_CACHE. A flag can disagree with reality after a failed or
- *      cancelled download, a manual cache clear, or another tab's actions.
- *   2. ONE JOB AT A TIME, ACROSS TABS. Download, remove and "use minimal" all
- *      take the same Web Lock, so a second tab is refused instead of racing.
- *   3. REMOVAL IS SHARED-AWARE. `common` is a subset of `full`, so deleting one
- *      pack must never delete chunks the other still needs. Removal computes
- *      the union of the other packs' lists (plus anything currently
- *      downloading) and protects it.
- *   4. ONLY THE PACK CACHE IS TOUCHED. Chunks cached by normal use live in the
- *      service worker's data cache and must never be deleted here.
+ * Design rules:
+ *   1. THE CACHE IS THE SOURCE OF TRUTH (no localStorage "installed" flag).
+ *   2. ONE JOB AT A TIME, ACROSS TABS (Web Lock golinux-pack-job).
+ *   3. CANCEL AWAITS CLEANUP before removePack()/useMinimal() acquire the lock.
+ *   4. BROADCAST NEVER ECHOES (receiver redraws locally without re-broadcasting).
+ *   5. PACK FETCHES USE ?gl_pack=1 so sw.js never double-caches into GL_DATA_CACHE.
+ *   6. QUOTA ERRORS ABORT IMMEDIATELY instead of burning bandwidth on 5,600 retries.
  */
 (function () {
+  "use strict";
+
   const PACKS = [
     { id: "minimal", label: "Minimal", file: null,
       desc: "Snapshot only — boots instantly. No extra tools cached." },
@@ -30,11 +24,13 @@
   const JOB_LOCK = "golinux-pack-job";
   const BC_NAME = "golinux-packs";
 
-  let manifest = {};        // packs/index.json: { id: {chunks, bytes, ...} }
-  let lists = {};           // id -> [chunk names]
+  let manifest = {};
+  let lists = {};
   let onUpdate = () => {};
-  let job = null;           // { kind, packId, total, done, loaded, paused, cancelled }
+  let job = null;
+  let activeJobPromise = null;
   let abort = null;
+  let lastStates = null;
   let channel = null;
   try { channel = new BroadcastChannel(BC_NAME); } catch (e) { /* unsupported */ }
 
@@ -44,7 +40,6 @@
 
   async function openPackCache() { return caches.open(GL_PACK_CACHE); }
 
-  /** One keys() call, so a 5,600-chunk pack costs one scan, not 5,600. */
   async function cachedUrlSet() {
     const cache = await openPackCache();
     return new Set((await cache.keys()).map((k) => k.url));
@@ -56,18 +51,19 @@
       const r = await fetch(glPackUrl("index.json"), { cache: "no-store" });
       if (r.ok) manifest = await r.json();
       else console.warn("pack index unavailable (offline?)");
-    } catch (e) { /* offline; sizes unknown */ }
+    } catch (e) { /* offline */ }
     return manifest;
   }
 
-  /** Chunk names for a pack, from its list file. Cached in memory. */
   async function loadList(id) {
     if (lists[id]) return lists[id];
     const meta = PACKS.find((p) => p.id === id);
     if (!meta || !meta.file) return [];
     const r = await fetch(glPackUrl(meta.file), { cache: "no-store" });
     if (!r.ok) throw new Error("could not load the " + id + " pack list");
-    lists[id] = await r.json();
+    const parsed = await r.json();
+    if (!Array.isArray(parsed)) throw new Error("invalid pack list for " + id);
+    lists[id] = parsed;
     return lists[id];
   }
 
@@ -83,7 +79,6 @@
         total = names.length;
         for (const n of names) if (cached.has(keyFor(n))) present++;
       } catch (e) {
-        // List unavailable (offline, first visit): report unknown rather than 0.
         total = (manifest[id] && manifest[id].chunks) || 0;
         present = 0;
       }
@@ -93,8 +88,12 @@
         started: present > 0 && present < total,
       };
     }
-    out.minimal = { id: "minimal", present: 0, total: 0,
-      complete: !out.common.complete && !out.full.complete, started: false };
+    out.minimal = {
+      id: "minimal", present: 0, total: 0,
+      complete: !out.common.complete && !out.full.complete,
+      started: false,
+    };
+    lastStates = out;
     return out;
   }
 
@@ -102,11 +101,15 @@
     return job ? { ...job } : null;
   }
 
-  async function emit() {
-    const states = await packStates();
+  async function emit(opts) {
+    const broadcast = !(opts && opts.broadcast === false);
+    const recompute = !(opts && opts.recompute === false);
+    const states = (recompute || !lastStates) ? await packStates() : lastStates;
     const payload = { job: jobSnapshot(), states, manifest, busy: !!job };
     onUpdate(payload);
-    try { channel && channel.postMessage({ type: "state" }); } catch (e) {}
+    if (broadcast) {
+      try { channel && channel.postMessage({ type: "state" }); } catch (e) {}
+    }
     return payload;
   }
 
@@ -114,42 +117,44 @@
 
   async function withJob(kind, packId, fn) {
     if (job) {
-      await emit();
+      await emit({ broadcast: false });
       return { refused: true, reason: "Another pack job is already running." };
     }
     if (!navigator.locks || !navigator.locks.request) {
-      // No Web Locks: still run, but only one at a time in this tab (checked
-      // above). Cross-tab safety is best-effort on such browsers.
-      return runJob(kind, packId, fn);
+      const p = runJob(kind, packId, fn);
+      activeJobPromise = p;
+      return p;
     }
     let result = null;
     let refused = false;
-    await navigator.locks.request(JOB_LOCK, { ifAvailable: true }, async (lock) => {
+    const lockPromise = navigator.locks.request(JOB_LOCK, { ifAvailable: true }, async (lock) => {
       if (!lock) { refused = true; return; }
       result = await runJob(kind, packId, fn);
     });
+    activeJobPromise = lockPromise;
+    await lockPromise;
+    if (activeJobPromise === lockPromise) activeJobPromise = null;
     if (refused) {
-      return { refused: true,
-        reason: "Another tab is installing packs right now." };
+      return { refused: true, reason: "Another tab is installing packs right now." };
     }
     return result || { refused: true, reason: "Pack job did not start." };
   }
 
   async function runJob(kind, packId, fn) {
-    job = { kind, packId, total: 0, done: 0, loaded: 0,
-      paused: false, cancelled: false };
+    job = {
+      kind, packId, total: 0, done: 0, loaded: 0,
+      paused: false, cancelled: false, quotaError: false,
+    };
     abort = new AbortController();
-    await emit();
+    await emit({ broadcast: true, recompute: true });
     try {
       return await fn();
     } catch (e) {
       return { error: e && e.message ? e.message : String(e) };
     } finally {
-      const wasCancelled = job.cancelled;
       job = null;
       abort = null;
-      await emit();
-      void wasCancelled;
+      await emit({ broadcast: true, recompute: true });
     }
   }
 
@@ -158,12 +163,20 @@
     job.cancelled = true;
     job.paused = false;
     if (abort) { try { abort.abort(); } catch (e) {} }
-    emit();
+    emit({ broadcast: false, recompute: false });
     return true;
   }
 
-  function pause() { if (job) { job.paused = true; emit(); } }
-  function resume() { if (job) { job.paused = false; emit(); } }
+  async function cancelAndWait() {
+    const p = activeJobPromise;
+    cancel();
+    if (p) {
+      try { await p; } catch (e) {}
+    }
+  }
+
+  function pause() { if (job) { job.paused = true; emit({ broadcast: false, recompute: false }); } }
+  function resume() { if (job) { job.paused = false; emit({ broadcast: false, recompute: false }); } }
 
   async function waitWhilePaused() {
     while (job && job.paused && !job.cancelled) {
@@ -179,76 +192,76 @@
 
     job.total = names.length;
     job.done = 0;
-    await emit();
+    await emit({ broadcast: false, recompute: true });
 
     const cache = await openPackCache();
-    // Re-read the cache here, not once at the top: a resumed or second Save
-    // must see what is already present and fetch nothing.
     const cached = await cachedUrlSet();
     const queue = names.filter((n) => !cached.has(keyFor(n)));
-    job.done = names.length - queue.length;   // already-cached count toward done
+    job.done = names.length - queue.length;
 
     const CONCURRENCY = 6;
     const worker = async () => {
       for (;;) {
-        if (!job || job.cancelled) return;
+        if (!job || job.cancelled || job.quotaError) return;
         await waitWhilePaused();
-        if (!job || job.cancelled) return;
+        if (!job || job.cancelled || job.quotaError) return;
         const name = queue.shift();
         if (!name) return;
         try {
-          // Plain fetch: unlike the emulator's own disk URL, an absolute
-          // cross-origin URL is safe here.
-          const res = await fetch(glChunkUrl(name), { signal: abort.signal });
+          const base = glChunkUrl(name);
+          const sep = base.includes("?") ? "&" : "?";
+          const res = await fetch(base + sep + "gl_pack=1", { signal: abort.signal });
           if (res.ok) {
             const buf = await res.arrayBuffer();
+            if (!job || job.cancelled || job.quotaError) return;
             job.loaded += buf.byteLength;
-            // Same key shape the service worker looks up.
             await cache.put(keyFor(name), new Response(buf, {
               headers: { "Content-Length": String(buf.byteLength) },
             }));
           }
         } catch (e) {
-          if (job.cancelled) return;
-          // Leave it missing; a later Save retries just this chunk.
+          if (!job || job.cancelled) return;
+          if (e && e.name === "QuotaExceededError") {
+            job.quotaError = true;
+            try { abort && abort.abort(); } catch (_) {}
+            return;
+          }
         }
-        // Counted either way: a failed chunk is "attempted", and the next Save
-        // recomputes from the cache, so nothing is silently hidden.
+        if (!job) return;
         job.done++;
-        if (job.done % 20 === 0 || job.done >= job.total) emit();
+        if (job.done % 20 === 0 || job.done >= job.total) {
+          emit({ broadcast: false, recompute: false });
+        }
       }
     };
 
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
+    const quotaError = job.quotaError;
     const cancelled = job.cancelled;
     const states = await packStates();
+    if (quotaError) {
+      return {
+        error: "Storage quota exceeded. Remove a pack or free browser storage and retry.",
+      };
+    }
     if (cancelled) {
-      return { cancelled: true,
-        reason: "Download cancelled. Chunks already saved were kept." };
+      return {
+        cancelled: true,
+        reason: "Download cancelled. Chunks already saved were kept.",
+      };
     }
     if (!states[packId].complete) {
-      return { incomplete: true,
-        reason: `Saved ${states[packId].present} of ${states[packId].total} ` +
-          "chunks. Press Save again to resume." };
+      return {
+        incomplete: true,
+        reason: `Saved ${states[packId].present} of ${states[packId].total} chunks. Press Save again to resume.`,
+      };
     }
     return { complete: true };
   }
 
   /* ---------------- removal ---------------- */
 
-  /**
-   * Chunks that must survive a removal.
-   *
-   * The union of the chunk lists of every OTHER pack that actually has chunks
-   * saved (or is downloading). A pack that is present at all is protected in
-   * full, because a partially saved pack still depends on what it already has.
-   *
-   * Only packs with content count: `common` is a strict subset of `full`, so
-   * protecting *every* other pack's list unconditionally would mean "Remove
-   * common" could never delete anything. Protecting only saved packs keeps
-   * Remove meaningful while still never breaking a saved one.
-   */
   async function protectedNames(exceptId, inProgressId, cached) {
     const keep = new Set();
     const present = cached || (await cachedUrlSet());
@@ -256,9 +269,6 @@
       if (id === exceptId) continue;
       let names;
       try { names = await loadList(id); } catch (e) { continue; }
-      // A pack counts as "saved" only if essentially ALL of it is present.
-      // Testing "any chunk" is wrong: common ⊂ full, so installing common makes
-      // full look present and nothing could ever be removed.
       let found = 0;
       for (const n of names) if (present.has(keyFor(n))) found++;
       const saved = names.length > 0 && found >= names.length;
@@ -271,12 +281,6 @@
     return keep;
   }
 
-  /**
-   * Delete this pack's chunks that no other pack needs.
-   *
-   * Only GL_PACK_CACHE is touched: chunks the service worker cached during
-   * normal use live in the data cache and are never removed here.
-   */
   async function removePackChunks(packId, inProgressId) {
     const names = await loadList(packId);
     const keep = await protectedNames(packId, inProgressId);
@@ -289,7 +293,7 @@
         if (await cache.delete(keyFor(n))) deleted++;
       }
       job.done++;
-      if (job.done % 50 === 0) emit();
+      if (job.done % 50 === 0) emit({ broadcast: false, recompute: false });
     }
     return { deleted };
   }
@@ -307,14 +311,12 @@
     if (!REAL_PACKS.includes(packId)) {
       return { refused: true, reason: "Unknown pack: " + packId };
     }
-    // Removing the pack that is downloading means: cancel, then remove.
-    if (job && job.packId === packId) cancel();
+    if (job && job.packId === packId) await cancelAndWait();
     return withJob("remove", packId, () => removePackChunks(packId, null));
   }
 
-  /** "Use Minimal": remove every pack chunk (the snapshot is kept). */
   async function useMinimal() {
-    if (job) cancel();
+    if (job) await cancelAndWait();
     return withJob("minimal", "minimal", async () => {
       const cache = await openPackCache();
       const keys = await cache.keys();
@@ -323,13 +325,12 @@
       for (const k of keys) {
         if (!job.cancelled && (await cache.delete(k))) deleted++;
         job.done++;
-        if (job.done % 50 === 0) emit();
+        if (job.done % 50 === 0) emit({ broadcast: false, recompute: false });
       }
       return { deleted };
     });
   }
 
-  /** Cheap verify: how many of a pack's chunks are missing. */
   async function verify(packId) {
     const names = await loadList(packId);
     const cached = await cachedUrlSet();
@@ -338,12 +339,14 @@
     return { total: names.length, present: names.length - missing, missing };
   }
 
-  // Reflect changes made by another tab: recompute from the cache on notice.
+  // Reflect changes made by another tab WITHOUT re-broadcasting (prevents ping-pong loop).
   if (channel) {
-    channel.onmessage = () => { if (!job) emit(); };
+    channel.onmessage = () => {
+      if (!job) emit({ broadcast: false, recompute: true });
+    };
   }
 
-  window.GoPacks = {
+  const api = {
     PACKS,
     loadManifest,
     packStates,
@@ -352,9 +355,13 @@
     useMinimal,
     verify,
     cancel,
+    cancelAndWait,
     pause,
     resume,
-    onUpdate(fn) { onUpdate = fn; },
+    onUpdate(fn) { onUpdate = fn || (() => {}); },
     getJob() { return jobSnapshot(); },
   };
+
+  if (typeof window !== "undefined") window.GoPacks = api;
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();
