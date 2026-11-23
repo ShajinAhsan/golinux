@@ -11,15 +11,17 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v21";
+const GL_VERSION = "v22";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
- * (e.g. virtio_console, memory_size) changes so incompatible saved OPFS states
- * are never restored against a mismatched device list. */
-const GL_STATE_SCHEMA = 2;
+ * (e.g. virtio_console, memory_size, OS image) changes so incompatible saved
+ * OPFS states are never restored against a mismatched device/RAM layout. */
+const GL_STATE_SCHEMA = 3;
 
-/* Guest RAM in bytes. Must match tools/image/build-snapshot.sh (MEM_MB=256). */
-const GL_MEMORY_SIZE = 256 * 1024 * 1024;
+/* Guest RAM and disk size in bytes. Must match tools/image/build-snapshot.sh (MEM_MB=128)
+ * and tools/image/build.sh (DISK_SIZE=1G). */
+const GL_MEMORY_SIZE = 128 * 1024 * 1024;
+const GL_DISK_SIZE = 1 * 1024 * 1024 * 1024;
 
 /* Launch feature flags. Unstable/non-core features stay off until their tests
  * and invariants pass (see docs/stabilization/SCOPE.md). */

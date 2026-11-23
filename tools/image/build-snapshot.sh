@@ -15,7 +15,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 IMAGES="$ROOT/images"
 
-MEM_MB="${MEM_MB:-256}"
+MEM_MB="${MEM_MB:-128}"
 RAW="$IMAGES/debian-state.bin"
 OUT="$IMAGES/debian-state.bin.zst"
 

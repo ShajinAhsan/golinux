@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>GoLinux — Real Debian Linux inside your browser</title>
-<meta name="description" content="A real CLI-only Debian 12 Linux machine running 100% in your browser via WebAssembly. Boots in under a second. No server, no signup, works offline.">
+<title>GoLinux — Ultra-lightweight Alpine Linux inside your browser</title>
+<meta name="description" content="An ultra-lightweight Alpine Linux 3.21 machine with BusyBox and TinyCC running 100% in your browser via WebAssembly. Boots in under a second. No server, no signup, works offline.">
 <meta name="theme-color" content="#06080d">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -48,13 +48,13 @@
         <div class="hero-copy">
           <div class="eyebrow">
             <span class="pulse-dot" aria-hidden="true"></span>
-            Debian 12 · WebAssembly · Zero Backend
+            Alpine Linux 3.21 · BusyBox + TinyCC · Zero Backend
           </div>
           <h1>A real Linux machine,<br><span class="grad-text">right in your browser tab.</span></h1>
           <p class="lead">
-            Full Debian bookworm with <code>gcc</code>, <code>g++</code>, <code>git</code>,
-            <code>make</code>, <code>nano</code>, and <code>man</code> — running 100% locally on your
-            device. No cloud server, no signup, instant snapshot boot.
+            Ultra-lightweight Alpine Linux with <code>BusyBox</code>, instant <code>tcc</code>/<code>gcc</code> C
+            compiling, <code>python3</code>, <code>git</code>, <code>nano</code>, <code>htop</code>, and
+            <code>fastfetch</code> — running 100% locally on desktop and mobile.
           </p>
           <div class="hero-actions">
             <a class="btn btn-primary btn-lg" data-launch-url href="https://terminal.golinux.app">
@@ -68,9 +68,9 @@
           <div class="hero-meta">
             <span><strong>&lt;1s</strong> snapshot wake</span>
             <span class="sep" aria-hidden="true">·</span>
-            <span><strong>~13 MB</strong> first load</span>
+            <span><strong>~9 MB</strong> first load</span>
             <span class="sep" aria-hidden="true">·</span>
-            <span><strong>0</strong> server compute</span>
+            <span><strong>128 MB</strong> mobile-friendly RAM</span>
           </div>
         </div>
 
@@ -84,7 +84,7 @@
               <div class="term-badge"><span class="dot-ok"></span>WASM</div>
             </div>
             <div class="term-body" id="heroTerm">
-              <div class="t-line"><span class="t-dim">GoLinux · Debian 12 (bookworm) i386 · local WebAssembly VM</span></div>
+              <div class="t-line"><span class="t-dim">GoLinux · Alpine Linux 3.21 (x86) · BusyBox + TinyCC WASM VM</span></div>
               <div class="t-line"><span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> <span class="t-cmd">ls -F</span></div>
               <div class="t-line t-cols">
                 <span class="c-dir">projects/</span>
@@ -93,8 +93,8 @@
                 <span class="c-exec">build.sh*</span>
                 <span class="c-arc">backup.tar.gz</span>
               </div>
-              <div class="t-line"><span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> <span class="t-cmd" id="heroTyped">gcc hello.c -o hello &amp;&amp; ./hello</span><span class="t-cursor" aria-hidden="true"></span></div>
-              <div class="t-line" id="heroOutput"><span class="c-exec">Hello from Debian inside WebAssembly!</span></div>
+              <div class="t-line"><span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> <span class="t-cmd" id="heroTyped">tcc -run hello.c</span><span class="t-cursor" aria-hidden="true"></span></div>
+              <div class="t-line" id="heroOutput"><span class="c-exec">Hello from Alpine Linux inside WebAssembly!</span></div>
             </div>
           </div>
         </div>
@@ -212,12 +212,12 @@
             <button class="how-step" type="button" role="tab" aria-selected="false" data-step="1">
               <span class="step-num">02</span>
               <strong>Instant Snapshot Boot</strong>
-              <span>Instead of a 20-second boot, a ~13 MB saved memory snapshot wakes Debian straight at your prompt.</span>
+              <span>Instead of a slow boot, a tiny saved memory snapshot wakes Alpine straight at your prompt in under a second.</span>
             </button>
             <button class="how-step" type="button" role="tab" aria-selected="false" data-step="2">
               <span class="step-num">03</span>
-              <strong>Lazy 128 KB Disk Blocks</strong>
-              <span>Run <code>gcc</code> and only the blocks it reads stream from edge storage into your cache — later runs are instant.</span>
+              <strong>Smart Hybrid Bundles</strong>
+              <span>Core tools stay hot in RAM; larger tools stream in small &lt;640 KB bundles from edge CDN straight into your local cache.</span>
             </button>
             <button class="how-step" type="button" role="tab" aria-selected="false" data-step="3">
               <span class="step-num">04</span>
@@ -234,13 +234,13 @@
       <div class="wrap">
         <div class="section-head">
           <div class="kicker">What's inside</div>
-          <h2>Real Debian 12 tools, ready to run.</h2>
-          <p>Not a fake JavaScript shell mock. Real ELF binaries compiled for Linux i386.</p>
+          <h2>Real Alpine Linux tools, ready to run.</h2>
+          <p>Not a fake JavaScript shell mock. Real x86 ELF binaries running on Linux 6.12 + musl.</p>
         </div>
 
         <div class="tools-shell">
           <div class="tool-pills" role="tablist" aria-label="Included tools">
-            <button class="tool-pill active" type="button" role="tab" aria-selected="true" data-tool="gcc">gcc / g++</button>
+            <button class="tool-pill active" type="button" role="tab" aria-selected="true" data-tool="gcc">tcc / gcc</button>
             <button class="tool-pill" type="button" role="tab" aria-selected="false" data-tool="python3">python3</button>
             <button class="tool-pill" type="button" role="tab" aria-selected="false" data-tool="git">git</button>
             <button class="tool-pill" type="button" role="tab" aria-selected="false" data-tool="fastfetch">fastfetch</button>
@@ -292,7 +292,7 @@
             <h3>Private &amp; offline-safe</h3>
             <p>
               Zero analytics, zero tracking, and guest networking is off by design. Experiment freely,
-              break anything, and hit <strong>Reset</strong> for a clean Debian install in a second.
+              break anything, and hit <strong>Reset</strong> for a clean Alpine install in a second.
             </p>
           </article>
 
@@ -309,9 +309,9 @@
 
           <article class="card card-wide card-specs">
             <div class="specs-grid">
-              <div><span class="spec-val">Debian 12</span><span class="spec-lbl">Bookworm i386</span></div>
-              <div><span class="spec-val">256 MB</span><span class="spec-lbl">Guest RAM</span></div>
-              <div><span class="spec-val">5 GB</span><span class="spec-lbl">Virtual ext4 disk</span></div>
+              <div><span class="spec-val">Alpine 3.21</span><span class="spec-lbl">Linux 6.12 + musl</span></div>
+              <div><span class="spec-val">128 MB</span><span class="spec-lbl">Mobile-light RAM</span></div>
+              <div><span class="spec-val">1 GB</span><span class="spec-lbl">Virtual ext4 disk</span></div>
               <div><span class="spec-val">0 bytes</span><span class="spec-lbl">Sent to servers</span></div>
             </div>
           </article>
@@ -324,7 +324,7 @@
       <div class="wrap">
         <div class="cta-box">
           <h2>Ready to open a shell?</h2>
-          <p>No sign-up, no install, no waiting. Boot Debian 12 in your browser right now.</p>
+          <p>No sign-up, no install, no waiting. Boot Alpine Linux in your browser right now.</p>
           <a class="btn btn-primary btn-lg" data-launch-url href="https://terminal.golinux.app">
             Try GoLinux Now
             <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -338,7 +338,7 @@
 
   <footer class="footer">
     <div class="wrap footer-inner">
-      <span>GoLinux — MIT licensed · Powered by v86, xterm.js, SeaBIOS &amp; Debian.</span>
+      <span>GoLinux — MIT licensed · Powered by v86, xterm.js, SeaBIOS &amp; Alpine Linux.</span>
       <div class="footer-links">
         <a data-launch-url href="https://terminal.golinux.app">Terminal</a>
         <a href="about.html">Licenses &amp; About</a>

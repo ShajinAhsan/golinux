@@ -33,42 +33,41 @@ const { V86 } = require(path.join(ROOT, "assets/v86/libv86.js"));
 const CHUNK_SIZE = 128 * 1024;
 const OUT = path.join(ROOT, "packs", "tools.json");
 const SNAPSHOT_ZST = path.join(ROOT, "images", "debian-state.bin.zst");
-const MEMORY_SIZE = 256 * 1024 * 1024;   // must match the snapshot
+const MEMORY_SIZE = 128 * 1024 * 1024;   // must match the snapshot
 
-// First-use commands per tool: what a beginner actually runs the first time.
+// First-use commands per tool: what a user actually runs the first time.
 const TOOLS = {
   "ls": ["ls -la /bin /usr/bin /etc >/dev/null"],
   "nano": ["nano --version >/dev/null"],
-  "vim": ["vim --version >/dev/null"],
+  "vi": ["vi --help >/dev/null 2>&1 || true"],
   "tree": ["tree -L 1 / >/dev/null"],
   "htop": ["htop --version >/dev/null"],
   "jq": ["printf '{\"ok\":true}\\n' | jq .ok >/dev/null"],
-  "file": ["file /bin/ls >/dev/null"],
+  "file": ["file /bin/busybox >/dev/null"],
   "bc": ["echo '2+2' | bc >/dev/null"],
   "zip": ["zip -v >/dev/null", "unzip -v >/dev/null"],
   "fastfetch": ["fastfetch >/dev/null"],
   "cowsay": ["cowsay hi >/dev/null"],
   "figlet": ["figlet hi >/dev/null"],
   "sl": ["which sl >/dev/null"],
-  "neofetch": ["neofetch --stdout >/dev/null"],
   "tmux": ["tmux -V >/dev/null"],
   "git": ["git --version >/dev/null", "git status >/dev/null 2>&1 || true"],
   "make": [
     "printf 'all:\\n\\t@true\\n' > /tmp/Makefile",
     "make -C /tmp all >/dev/null",
   ],
-  "python3": ["python3 -c 'import json, math, os; print(json.dumps([math.pi]))' >/dev/null"],
+  "tcc": [
+    "printf '#include <stdio.h>\\nint main(){puts(\"ok\");return 0;}\\n' > /tmp/g.c",
+    "tcc -o /tmp/gc /tmp/g.c",
+    "/tmp/gc >/dev/null",
+  ],
   "gcc": [
-    "printf 'int main(){return 0;}' > /tmp/g.c",
-    "gcc -O0 -o /tmp/gc /tmp/g.c",
-    "/tmp/gc",
+    "printf '#include <stdio.h>\\nint main(){puts(\"ok\");return 0;}\\n' > /tmp/g2.c",
+    "gcc -o /tmp/gc2 /tmp/g2.c",
+    "/tmp/gc2 >/dev/null",
   ],
-  "g++": [
-    "printf '#include <vector>\\nint main(){std::vector<int> v; return (int)v.size();}' > /tmp/g.cpp",
-    "g++ -O0 -o /tmp/gcpp /tmp/g.cpp",
-    "/tmp/gcpp",
-  ],
-  "man": ["man ls >/dev/null", "man git >/dev/null"],
+  "python3": ["python3 -c 'import json, math, os; print(json.dumps([math.pi]))' >/dev/null"],
+  "man": ["man ls >/dev/null 2>&1 || true", "man nano >/dev/null 2>&1 || true"],
   "curl": ["curl --version >/dev/null"],
 };
 
@@ -278,9 +277,11 @@ function recordTool(tool, stateBuffer) {
       if (!fs.existsSync(p)) throw new Error(`missing chunk while recording ${tool}: ${c}`);
       return s + fs.statSync(p).size;
     }, 0);
-    out[tool] = { title: tool, chunks: recorded, bytes };
+    if (recorded.length > 0) {
+      out[tool] = { title: tool, chunks: recorded, bytes };
+    }
     console.error(`[tools] ${tool.padEnd(5)} ${String(recorded.length).padStart(4)} chunks  ` +
-      `${(bytes / 1048576).toFixed(1)} MB`);
+      `${(bytes / 1048576).toFixed(1)} MB${recorded.length === 0 ? " (warm in snapshot RAM)" : ""}`);
   }
 
   fs.writeFileSync(OUT, JSON.stringify(out, null, 2));

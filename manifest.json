@@ -1,7 +1,7 @@
 {
   "name": "GoLinux",
   "short_name": "GoLinux",
-  "description": "A CLI-only Debian bookworm i386, emulated in the browser with v86.",
+  "description": "Ultra-lightweight Alpine Linux 3.21 (x86) with BusyBox & TinyCC, emulated in the browser with v86.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

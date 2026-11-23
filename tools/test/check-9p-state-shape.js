@@ -37,17 +37,17 @@ const emulator = new V86({
   hda: {
     url: path.join(ROOT, "images", "debian.img"),
     async: true,
-    size: 5 * 1024 * 1024 * 1024,
+    size: fs.statSync(path.join(ROOT, "images", "debian.img")).size,
   },
   filesystem: {},
-  cmdline: "root=/dev/sda rw console=ttyS0",
-  memory_size: 256 * 1024 * 1024,
+  cmdline: "root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0",
+  memory_size: 128 * 1024 * 1024,
   autostart: true,
 });
 
 emulator.add_listener("serial0-output-byte", (byte) => {
   serial += String.fromCharCode(byte);
-  if (phase === 0 && /root@golinux:~#/.test(serial)) {
+  if (phase === 0 && /root@golinux:~#/.test(serial.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""))) {
     phase = 1;
     run();
   }

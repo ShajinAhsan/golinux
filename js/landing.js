@@ -14,9 +14,9 @@
 
   /* ---------- Interactive "How does it work?" stepper ---------- */
   const CAPTIONS = [
-    "Your browser starts a tiny virtual x86 PC using WebAssembly — nothing runs on a remote server.",
-    "A ~13 MB pre-booted snapshot loads once into RAM, waking Debian at the shell prompt in under a second.",
-    "When you run a command like gcc, only its 128 KB disk slices stream from Cloudflare R2 into your local cache.",
+    "Your browser starts a lightweight 128 MB virtual x86 PC using WebAssembly — nothing runs on a remote server.",
+    "A compact pre-booted memory snapshot loads once into RAM, waking Alpine Linux at the prompt in under a second.",
+    "Core BusyBox commands stay hot in RAM; larger tools stream in tiny <640 KB bundles from Cloudflare's edge cache.",
     "Files you save in /root persist privately in your browser's OPFS storage and survive reloads.",
   ];
 
@@ -85,12 +85,12 @@
   /* ---------- Interactive "What's inside" tool demos ---------- */
   const DEMOS = {
     gcc: {
-      title: "gcc / g++ — Real GCC 12 C & C++ compiler",
+      title: "tcc / gcc — Instant TinyCC C compiler (sub-second even on mobile)",
       html:
         `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> cat hello.c\n` +
-        `<span class="c-c">#include &lt;stdio.h&gt;</span>\nint main(void) { puts("Hello from WASM!"); return 0; }\n\n` +
-        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> gcc -O2 hello.c -o hello &amp;&amp; ./hello\n` +
-        `<span class="c-exec">Hello from WASM!</span>`,
+        `<span class="c-c">#include &lt;stdio.h&gt;</span>\nint main(void) { puts("Hello from TinyCC!"); return 0; }\n\n` +
+        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> tcc hello.c -o hello &amp;&amp; ./hello   <span class="t-dim"># or: tcc -run hello.c</span>\n` +
+        `<span class="c-exec">Hello from TinyCC!</span>`,
     },
     git: {
       title: "git — Full local repositories, branches & diffs",
@@ -101,22 +101,22 @@
         `<span class="c-warn">9a4f1c2</span> <span class="c-sym">(HEAD -&gt; master)</span> init`,
     },
     python3: {
-      title: "python3 — Real Python 3.11 interpreter & standard library",
+      title: "python3 — Real Python 3.12 interpreter & standard library",
       html:
         `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> python3 -c "import math, json; print(json.dumps({'pi': round(math.pi, 5)}))"\n` +
         `<span class="c-exec">{"pi": 3.14159}</span>\n\n` +
         `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> python3 --version\n` +
-        `Python 3.11.2`,
+        `Python 3.12`,
     },
     fastfetch: {
-      title: "fastfetch / neofetch — Instant system info in vibrant color",
+      title: "fastfetch — Native C system info in vibrant color",
       html:
         `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> fastfetch\n` +
         `<span class="c-exec">root@golinux</span>\n` +
-        `<span class="t-dim">--------------------------</span>\n` +
-        `<span class="c-dir">OS</span>: Debian GNU/Linux 12 (bookworm) i686\n` +
-        `<span class="c-dir">Host</span>: v86 WebAssembly VM (Browser)\n` +
-        `<span class="c-dir">Kernel</span>: Linux 6.1 · <span class="c-dir">Memory</span>: 256 MiB`,
+        `<span class="t-dim">------------</span>\n` +
+        `<span class="c-dir">OS</span>: Alpine Linux 3.21 i686\n` +
+        `<span class="c-dir">Host</span>: v86 WebAssembly VM (128 MiB)\n` +
+        `<span class="c-dir">Kernel</span>: Linux 6.12 · <span class="c-dir">Shell</span>: bash 5.2`,
     },
     editors: {
       title: "vim & nano — Full-screen editing in xterm-256color",

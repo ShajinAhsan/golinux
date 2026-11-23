@@ -17,43 +17,30 @@ const ROOT = path.join(__dirname, "..", "..");
 const { V86 } = require(path.join(ROOT, "assets/v86/libv86.js"));
 
 const CHUNK_SIZE = 128 * 1024;
-const DISK_BYTES = 5 * 1024 * 1024 * 1024;
+const DISK_BYTES = fs.statSync(path.join(ROOT, "images/debian.img")).size;
 const MODE = process.argv[2] || "common";
 
 // The tools whose read footprint makes up the "common" pack.
-//
-// `--version` alone is not enough: it only loads the driver binary. A real
-// compilation pulls in cc1, cc1plus, as, ld and the runtime libraries, which
-// live in different chunks. Both are included so the pack actually compiles.
 const COMMON_COMMANDS = [
   "ls -la /bin /usr/bin /etc >/dev/null",
   "nano --version >/dev/null",
   "git --version >/dev/null",
   "git status >/dev/null 2>&1 || true",
-  "gcc --version >/dev/null",
-  "g++ --version >/dev/null",
+  "tcc -v >/dev/null",
   "make --version >/dev/null",
-
-  // Real compile: driver, cc1, cc1plus, as, ld, crt objects, libc, libstdc++.
-  "printf 'int main(){return 0;}' > /tmp/p.c",
-  "printf '#include <vector>\\nint main(){std::vector<int> v; v.push_back(1); return (int)v.size()-1;}' > /tmp/p.cpp",
-  "gcc -O0 -o /tmp/pc /tmp/p.c",
-  "g++ -O0 -o /tmp/pcpp /tmp/p.cpp",
-  "/tmp/pc",
-  "/tmp/pcpp",
-
-  // A trivial make run, so make's own rule files are touched.
+  "printf '#include <stdio.h>\\nint main(){puts(\"ok\");return 0;}\\n' > /tmp/p.c",
+  "tcc -o /tmp/pc /tmp/p.c",
+  "/tmp/pc >/dev/null",
   "printf 'all:\\n\\t@true\\n' > /tmp/Makefile",
   "make -C /tmp all >/dev/null",
-
-  "man ls >/dev/null",
-  "man git >/dev/null",
-  "man gcc >/dev/null 2>&1 || true",
-  "man make >/dev/null",
-  "man g++ >/dev/null 2>&1 || true",
-  "which ls gcc g++ git make nano man",
-  "du -sh /usr >/dev/null",
-  "lsblk >/dev/null",
+  "fastfetch >/dev/null",
+  "cowsay hi >/dev/null",
+  "figlet hi >/dev/null",
+  "tree -L 1 / >/dev/null",
+  "htop --version >/dev/null",
+  "printf '{\"a\":1}\\n' | jq .a >/dev/null",
+  "python3 -c 'print(1+1)' >/dev/null",
+  "man ls >/dev/null 2>&1 || true",
 ];
 
 const readChunks = new Set();
@@ -153,8 +140,8 @@ const emulator = new V86({
   // Real disk bytes, read through a recording wrapper so we see exactly which
   // chunks the tools touch. Boot-time reads happen before recording is enabled.
   hda: wrapRecording(recording),
-  cmdline: "root=/dev/sda rw console=ttyS0",
-  memory_size: 256 * 1024 * 1024,
+  cmdline: "root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0",
+  memory_size: 128 * 1024 * 1024,
   autostart: true,
 });
 

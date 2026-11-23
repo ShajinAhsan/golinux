@@ -20,9 +20,9 @@ import { initChunkFallback } from "./chunk-fallback.js";
 
 const FRESH_MOTD = [
   "",
-  "  \x1b[1;32mGoLinux\x1b[0m \x1b[2m· Debian 12 (bookworm) i386 · local WebAssembly VM\x1b[0m",
-  "  \x1b[36mTools:\x1b[0m gcc/g++, python3, git, make, vim, nano, tmux, htop, jq, tree, man",
-  "  \x1b[35mFun:\x1b[0m   fastfetch, neofetch, cowsay, figlet, sl",
+  "  \x1b[1;32mGoLinux\x1b[0m \x1b[2m· Alpine Linux 3.21 (x86) · BusyBox + TinyCC · 128 MB WASM VM\x1b[0m",
+  "  \x1b[36mTools:\x1b[0m tcc/gcc (instant C), python3, git, make, nano, vi, tmux, htop, jq, tree, man",
+  "  \x1b[35mFun:\x1b[0m   fastfetch, cowsay, figlet, sl",
   "  \x1b[2mOffline-safe (no guest network) · /root persists locally · transfer via /mnt/host\x1b[0m",
   "",
 ].join("\r\n");
@@ -194,7 +194,7 @@ export async function bootMachine() {
     setStatus("restoring…");
     userState = await window.GoPersist.loadUserState();
     if (!userState) {
-      setLoading("Starting a fresh machine", "Loading the shipped Debian snapshot.");
+      setLoading("Starting a fresh machine", "Loading the shipped Alpine Linux snapshot.");
     }
   }
 
@@ -209,7 +209,7 @@ export async function bootMachine() {
     window.__usedUserState = false;
     const cached = await snapshotIsCached();
     if (!cached) {
-      setLoading("Downloading the machine", "About 13 MB the first time; cached afterwards.");
+      setLoading("Downloading the machine", "A lightweight ~9 MB snapshot the first time; cached afterwards.");
       showProgress(0, 0);
     } else {
       setLoading("Starting…", "Restoring the shipped snapshot.");
@@ -234,7 +234,7 @@ export async function bootMachine() {
     async: true,
     use_parts: true,
     fixed_chunk_size: 128 * 1024,
-    size: 5 * 1024 * 1024 * 1024,
+    size: typeof GL_DISK_SIZE === "number" ? GL_DISK_SIZE : 1 * 1024 * 1024 * 1024,
   };
 
   const container = document.getElementById("terminal");
@@ -261,7 +261,7 @@ export async function bootMachine() {
     // Cold-boot fallback (?nosnapshot): serial_console on ttyS0.
     options.bzimage = { url: "images/debian-bzImage" };
     options.initrd = { url: "images/debian-initrd" };
-    options.cmdline = "root=/dev/sda rw console=ttyS0";
+    options.cmdline = "root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0";
     options.serial_console = {
       type: "xtermjs",
       container,

@@ -39,28 +39,27 @@ const OUT_INDEX = path.join(ROOT, "bundles.json");
 const CHUNK_SIZE = 128 * 1024;
 const CHUNK_RE = /^chunk-(\d+)-(\d+)\.zst$/;
 
-// Ordered tiers: earlier tiers claim shared chunks first (so libc/shared libs
-// land in the tiny hot b-core bundle instead of being buried in b-gcc!).
+// Ordered tiers: earlier tiers claim shared chunks first. Capped at 512-640 KB
+// so mobile browsers never stall waiting on a large bundle!
 const TIERS = [
   {
     prefix: "core",
-    maxBytes: 750 * 1024,
-    maxChunks: 32,
+    maxBytes: 512 * 1024,
+    maxChunks: 24,
     tools: [
-      "ls", "nano", "vim", "tree", "htop", "jq", "file", "bc",
-      "fastfetch", "cowsay", "figlet", "sl", "neofetch", "make", "zip",
+      "ls", "nano", "vi", "tree", "htop", "jq", "file", "bc",
+      "fastfetch", "cowsay", "figlet", "sl", "make", "zip",
     ],
   },
-  { prefix: "git", maxBytes: 1024 * 1024, maxChunks: 32, tools: ["git"] },
-  { prefix: "tmux", maxBytes: 1024 * 1024, maxChunks: 32, tools: ["tmux"] },
-  { prefix: "py", maxBytes: 1024 * 1024, maxChunks: 32, tools: ["python3"] },
-  { prefix: "man", maxBytes: 1024 * 1024, maxChunks: 32, tools: ["man"] },
-  { prefix: "curl", maxBytes: 1024 * 1024, maxChunks: 32, tools: ["curl"] },
-  { prefix: "gcc", maxBytes: 1024 * 1024, maxChunks: 32, tools: ["gcc"] },
-  { prefix: "gpp", maxBytes: 1024 * 1024, maxChunks: 32, tools: ["g++"] },
+  { prefix: "tcc", maxBytes: 640 * 1024, maxChunks: 24, tools: ["tcc", "gcc"] },
+  { prefix: "git", maxBytes: 640 * 1024, maxChunks: 24, tools: ["git"] },
+  { prefix: "tmux", maxBytes: 640 * 1024, maxChunks: 24, tools: ["tmux"] },
+  { prefix: "py", maxBytes: 768 * 1024, maxChunks: 24, tools: ["python3"] },
+  { prefix: "man", maxBytes: 640 * 1024, maxChunks: 24, tools: ["man"] },
+  { prefix: "curl", maxBytes: 640 * 1024, maxChunks: 24, tools: ["curl"] },
 ];
 
-const TAIL_MAX_BYTES = 768 * 1024;
+const TAIL_MAX_BYTES = 640 * 1024;
 const TAIL_MAX_CHUNKS = 24;
 
 function chunkIndex(name) {
