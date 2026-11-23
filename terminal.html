@@ -85,10 +85,10 @@
     <button id="offlineBannerDismiss" aria-label="Dismiss">Dismiss</button>
   </div>
 
-  <div id="updateBanner" role="status">
+  <div id="updateBanner" role="status" hidden>
     <span class="grow">A new GoLinux update is ready.</span>
-    <button id="updateBannerReload">Reload now</button>
-    <button id="updateBannerDismiss" aria-label="Dismiss">Dismiss</button>
+    <button id="updateBannerReload" onclick="try{sessionStorage.removeItem('gl_reloaded_for')}catch(e){}location.reload()">Reload now</button>
+    <button id="updateBannerDismiss" aria-label="Dismiss" onclick="this.parentElement.hidden=true;this.parentElement.classList.remove('visible')">Dismiss</button>
   </div>
 
   <div id="packs" role="dialog" aria-modal="true" aria-labelledby="packsTitle" data-feature="packs">
@@ -224,6 +224,26 @@
   </div>
 </div>
 
+<script>
+if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+  navigator.serviceWorker.addEventListener("controllerchange", function () {
+    if (window.__glUpgradeHandled) return;
+    window.__glUpgradeHandled = true;
+    var k = "gl_sw_rescue_" + (window.GL_VERSION || "old");
+    if (!window.__glBootStarted) {
+      try {
+        if (sessionStorage.getItem(k) !== "1") {
+          sessionStorage.setItem(k, "1");
+          location.reload();
+          return;
+        }
+      } catch (e) {}
+    }
+    var b = document.getElementById("updateBanner");
+    if (b) { b.hidden = false; b.classList.add("visible"); }
+  });
+}
+</script>
 <script src="packs-config.js"></script>
 <script src="packs.js"></script>
 <script src="persist.js"></script>

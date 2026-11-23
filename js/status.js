@@ -88,7 +88,10 @@ let updateDismissed = false;
 export function showUpdateBanner() {
   if (updateDismissed) return;
   const el = $("updateBanner");
-  if (el) el.classList.add("visible");
+  if (el) {
+    el.hidden = false;
+    el.classList.add("visible");
+  }
 }
 
 export function setupStatusChrome() {
@@ -108,7 +111,10 @@ export function setupStatusChrome() {
     updateDismiss.onclick = () => {
       updateDismissed = true;
       const el = $("updateBanner");
-      if (el) el.classList.remove("visible");
+      if (el) {
+        el.hidden = true;
+        el.classList.remove("visible");
+      }
     };
   }
 

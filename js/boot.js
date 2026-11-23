@@ -151,7 +151,8 @@ export async function prepareChunkAccess() {
 
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     pushAssetBase();
-    if (!hadController) return;
+    if (!hadController || window.__glUpgradeHandled) return;
+    window.__glUpgradeHandled = true;
     if (!bootStarted) {
       triggerUpgradeReload("sw-ctrl-" + GL_VERSION + "-" + (GL_BUILD_ID || "dev"));
     } else {
@@ -292,6 +293,7 @@ let restarting = false;
 
 export async function bootMachine() {
   bootStarted = true;
+  window.__glBootStarted = true;
   const bootStart = performance.now();
 
   if (navigator.storage && navigator.storage.persist) {
