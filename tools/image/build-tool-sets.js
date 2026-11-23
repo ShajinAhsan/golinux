@@ -39,11 +39,25 @@ const MEMORY_SIZE = 256 * 1024 * 1024;   // must match the snapshot
 const TOOLS = {
   "ls": ["ls -la /bin /usr/bin /etc >/dev/null"],
   "nano": ["nano --version >/dev/null"],
+  "vim": ["vim --version >/dev/null"],
+  "tree": ["tree -L 1 / >/dev/null"],
+  "htop": ["htop --version >/dev/null"],
+  "jq": ["printf '{\"ok\":true}\\n' | jq .ok >/dev/null"],
+  "file": ["file /bin/ls >/dev/null"],
+  "bc": ["echo '2+2' | bc >/dev/null"],
+  "zip": ["zip -v >/dev/null", "unzip -v >/dev/null"],
+  "fastfetch": ["fastfetch >/dev/null"],
+  "cowsay": ["cowsay hi >/dev/null"],
+  "figlet": ["figlet hi >/dev/null"],
+  "sl": ["which sl >/dev/null"],
+  "neofetch": ["neofetch --stdout >/dev/null"],
+  "tmux": ["tmux -V >/dev/null"],
   "git": ["git --version >/dev/null", "git status >/dev/null 2>&1 || true"],
   "make": [
     "printf 'all:\\n\\t@true\\n' > /tmp/Makefile",
     "make -C /tmp all >/dev/null",
   ],
+  "python3": ["python3 -c 'import json, math, os; print(json.dumps([math.pi]))' >/dev/null"],
   "gcc": [
     "printf 'int main(){return 0;}' > /tmp/g.c",
     "gcc -O0 -o /tmp/gc /tmp/g.c",
@@ -194,6 +208,7 @@ function recordTool(tool, stateBuffer) {
       vga_bios: { url: path.join(ROOT, "assets/bios/vgabios.bin") },
       hda: makeDisk(),
       filesystem: {},
+      virtio_console: true,
       memory_size: MEMORY_SIZE,
       // Restore the exact state production boots from: same guest RAM, same
       // cold page cache, no boot-time chunk reads.
@@ -204,7 +219,8 @@ function recordTool(tool, stateBuffer) {
 
     const finish = () => {
       try { emulator.stop(); } catch (e) {}
-      resolve([...readChunks].sort());
+      // Preserve FIRST-TOUCH order (critical for optimal streaming bundles!)
+      resolve([...readChunks]);
     };
 
     const timer = setTimeout(() => {

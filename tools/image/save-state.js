@@ -34,7 +34,7 @@ const SETUP_9P = [
 const BASH_PROFILE_CMD =
   "printf '%s\\n' " +
   "'export HOME=/root' " +
-  "'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' " +
+  "'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games' " +
   "'export LANG=C.UTF-8' " +
   "'[ -f /root/.bashrc ] && . /root/.bashrc' " +
   "'cd /root 2>/dev/null || cd /' " +
@@ -42,7 +42,7 @@ const BASH_PROFILE_CMD =
 
 const BASHRC_CMD =
   "printf '%s\\n' " +
-  "'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' " +
+  "'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games' " +
   "'export CLICOLOR=1' " +
   "'export LS_COLORS=\"di=1;34:ln=1;36:ex=1;32:so=1;35:pi=33:bd=1;33:cd=1;33:*.tar=1;31:*.tgz=1;31:*.gz=1;31:*.zip=1;31:*.zst=1;31:*.c=38;5;114:*.h=38;5;110:*.cpp=38;5;114:*.py=38;5;221:*.sh=1;32:*.md=38;5;183:*.json=38;5;215\"' " +
   "'alias ls=\"ls --color=auto\"' " +
@@ -121,10 +121,10 @@ const emulator = new V86({
 
 const started = Date.now();
 
-emulator.add_listener("virtio-console0-output-bytes", (bytes) => {
-  const s = Buffer.from(bytes).toString("utf8");
-  hvc.text += s;
-  if (phase === 1 && /root@golinux:~#\s*$/.test(hvc.text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, ""))) {
+const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, "");
+
+function maybeEnterPhase2() {
+  if (phase === 1 && /root@golinux:~#\s*$/.test(stripAnsi(hvc.text))) {
     if (!hvc.text.includes("\x1b[1;32mroot@golinux")) {
       console.error("[snapshot] ERROR: hvc0 prompt is missing ANSI colors: " + JSON.stringify(hvc.text.slice(-120)));
       emulator.stop(); process.exit(1);
@@ -141,6 +141,12 @@ emulator.add_listener("virtio-console0-output-bytes", (bytes) => {
     ].join("; ");
     emulator.serial0_send(`${PREP}; ${verify}\n`);
   }
+}
+
+emulator.add_listener("virtio-console0-output-bytes", (bytes) => {
+  const s = Buffer.from(bytes).toString("utf8");
+  hvc.text += s;
+  maybeEnterPhase2();
 });
 
 emulator.add_listener("serial0-output-byte", (byte) => {
@@ -148,11 +154,14 @@ emulator.add_listener("serial0-output-byte", (byte) => {
   serial.text += c;
   process.stdout.write(c);
 
-  if (phase === 0 && /root@golinux:~#/.test(serial.text)) {
+  if (phase === 0 && /root@golinux:~#/.test(stripAnsi(serial.text))) {
     phase = 1;
     const bootSecs = (Date.now() - started) / 1000;
     console.error(`\n\n[snapshot] ttyS0 prompt after ${bootSecs.toFixed(1)}s at ${MEM_MB} MB; setting up 9p + hvc0`);
     emulator.serial0_send(`dmesg -n 1; ${SETUP_9P}; ${MOTD}; ${SETUP_HVC0}\n`);
+    // If hvc0 already reached its login prompt at boot (baked into /etc/inittab),
+    // wait briefly for SETUP_9P/MOTD/SETUP_HVC0 to finish, then enter phase 2.
+    setTimeout(maybeEnterPhase2, 4000);
     return;
   }
 

@@ -100,30 +100,51 @@
         `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~/app</span><span class="t-muted">#</span> git log --oneline\n` +
         `<span class="c-warn">9a4f1c2</span> <span class="c-sym">(HEAD -&gt; master)</span> init`,
     },
-    nano: {
-      title: "nano — Clean full-screen editing with alternate screen",
+    python3: {
+      title: "python3 — Real Python 3.11 interpreter & standard library",
       html:
-        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> nano notes.md\n` +
+        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> python3 -c "import math, json; print(json.dumps({'pi': round(math.pi, 5)}))"\n` +
+        `<span class="c-exec">{"pi": 3.14159}</span>\n\n` +
+        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> python3 --version\n` +
+        `Python 3.11.2`,
+    },
+    fastfetch: {
+      title: "fastfetch / neofetch — Instant system info in vibrant color",
+      html:
+        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> fastfetch\n` +
+        `<span class="c-exec">root@golinux</span>\n` +
+        `<span class="t-dim">--------------------------</span>\n` +
+        `<span class="c-dir">OS</span>: Debian GNU/Linux 12 (bookworm) i686\n` +
+        `<span class="c-dir">Host</span>: v86 WebAssembly VM (Browser)\n` +
+        `<span class="c-dir">Kernel</span>: Linux 6.1 · <span class="c-dir">Memory</span>: 256 MiB`,
+    },
+    editors: {
+      title: "vim & nano — Full-screen editing in xterm-256color",
+      html:
+        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> nano notes.md   <span class="t-dim"># or vim notes.md</span>\n` +
         `<span class="t-dim"># Opens cleanly in xterm-256color alternate screen.\n` +
         `# Tap Ctrl + O on mobile or desktop to save, Ctrl + X to exit.\n` +
         `# Leaves zero leftover UI lines in your scrollback.</span>`,
     },
-    make: {
-      title: "make — Automated C/C++ build pipelines",
+    cli: {
+      title: "htop, tmux, jq, tree, zip & man — Power-user CLI toolkit",
       html:
-        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~/app</span><span class="t-muted">#</span> make\n` +
-        `gcc -Wall -O2 -c main.c -o main.o\n` +
-        `gcc -Wall -O2 main.o -o <span class="c-exec">app</span>\n` +
-        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~/app</span><span class="t-muted">#</span> ./app\n` +
-        `<span class="c-exec">Build succeeded in browser.</span>`,
+        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~/app</span><span class="t-muted">#</span> tree -L 2 &amp;&amp; echo '{"lang":"C"}' | jq -r .lang\n` +
+        `<span class="c-dir">.</span>\n` +
+        `├── <span class="c-c">main.c</span>\n` +
+        `└── <span class="c-exec">Makefile</span>\n` +
+        `<span class="c-warn">C</span>`,
     },
-    man: {
-      title: "man — Complete offline Linux & POSIX manual pages",
+    fun: {
+      title: "cowsay, figlet & sl — Classic terminal fun built right in",
       html:
-        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> man 3 printf | head -n 6\n` +
-        `<span class="c-dir">PRINTF(3)            Linux Programmer's Manual           PRINTF(3)</span>\n\n` +
-        `<span class="c-warn">NAME</span>\n` +
-        `       printf, fprintf, sprintf, snprintf - formatted output conversion`,
+        `<span class="t-prompt-u">root@golinux</span><span class="t-muted">:</span><span class="t-prompt-d">~</span><span class="t-muted">#</span> cowsay "Linux in a browser tab!"\n` +
+        ` ___________________________\n` +
+        `&lt; Linux in a browser tab! &gt;\n` +
+        ` ---------------------------\n` +
+        `        \\   ^__^\n` +
+        `         \\  (oo)\\_______\n` +
+        `            (__)\\       )\\/\\`,
     },
     ls: {
       title: "Vibrant shell — Colorized directories, executables & prompt",

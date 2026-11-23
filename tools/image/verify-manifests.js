@@ -217,6 +217,25 @@ if (!fs.existsSync(PRECACHE)) {
   }
 }
 
+// bundles.json (if built) must match buildId and cover all real chunks.
+const BUNDLES_JSON = path.join(ROOT, "bundles.json");
+if (!fs.existsSync(BUNDLES_JSON)) {
+  fail("bundles.json is missing — run: node tools/image/build-bundles.js");
+} else if (fs.existsSync(CHUNK_MANIFEST)) {
+  const b = JSON.parse(fs.readFileSync(BUNDLES_JSON, "utf8"));
+  const man = JSON.parse(fs.readFileSync(CHUNK_MANIFEST, "utf8")).real || [];
+  const bid = fs.existsSync(path.join(ROOT, "images", "build-id.json"))
+    ? JSON.parse(fs.readFileSync(path.join(ROOT, "images", "build-id.json"), "utf8")).buildId
+    : null;
+  if (bid && b.buildId !== bid) {
+    fail(`bundles.json buildId (${b.buildId}) does not match images/build-id.json (${bid}) — run: node tools/image/build-bundles.js`);
+  } else if (!Array.isArray(b.entries) || b.entries.length !== man.length) {
+    fail(`bundles.json covers ${b.entries ? b.entries.length : 0} chunks, expected ${man.length} — run: node tools/image/build-bundles.js`);
+  } else {
+    notes.push(`bundles.json ok (${b.files.length} bundles covering ${b.entries.length} chunks)`);
+  }
+}
+
 // public/_headers must detach Cache-Control with "! Cache-Control" before any narrow override.
 const HEADERS = path.join(ROOT, "public", "_headers");
 if (fs.existsSync(HEADERS)) {

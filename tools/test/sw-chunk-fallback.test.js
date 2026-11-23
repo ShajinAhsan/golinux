@@ -168,6 +168,9 @@ function fetchWith(chunkBehaviour) {
         headers: { "content-type": "application/json" },
       });
     }
+    if (url.endsWith("bundles.json")) {
+      return new Response("", { status: 404 });
+    }
     return chunkBehaviour(url, init);
   };
 }
@@ -186,11 +189,19 @@ async function testShellPrecacheIncludesManifestAndEmpty() {
 }
 
 async function testEmptyFallback() {
-  const d = loadWorker({ fetchImpl: fetchWith(async () => new Response("", { status: 404 })) });
+  let networkChunkFetches = 0;
+  const d = loadWorker({
+    fetchImpl: fetchWith(async (url) => {
+      networkChunkFetches++;
+      return new Response("", { status: 404 });
+    }),
+  });
   await seedEmptyTemplate(d);
   const resp = await d.dispatchFetch(chunkRequest(EMPTY_NAME));
   check((await resp.text()) === "ZEROBYTES",
-    "(a) 404 for zeroed chunk returns empty-chunk template");
+    "(a) known-empty chunk returns empty-chunk template");
+  check(networkChunkFetches === 0,
+    "(a) known-empty chunk short-circuits locally with ZERO R2 network fetches (Step 1)");
   check(!d.messages.some((m) => m && m.type === "chunk-missing-real"),
     "(a) no chunk-missing-real message for zeroed chunk");
 }
@@ -207,13 +218,11 @@ async function testRealChunk404() {
 }
 
 async function test500NeverZeros() {
-  for (const name of [REAL_NAME, EMPTY_NAME]) {
-    const d = loadWorker({ fetchImpl: fetchWith(async () => new Response("boom", { status: 500 })) });
-    await seedEmptyTemplate(d);
-    const resp = await d.dispatchFetch(chunkRequest(name));
-    check(resp.status === 500 && (await resp.text()) !== "ZEROBYTES",
-      `(c) 500 on ${name} passes through, never zeros`);
-  }
+  const d = loadWorker({ fetchImpl: fetchWith(async () => new Response("boom", { status: 500 })) });
+  await seedEmptyTemplate(d);
+  const resp = await d.dispatchFetch(chunkRequest(REAL_NAME));
+  check(resp.status === 500 && (await resp.text()) !== "ZEROBYTES",
+    `(c) 500 on ${REAL_NAME} passes through, never zeros`);
 }
 
 async function testOfflineRealAndEmptyPolicy() {
@@ -370,6 +379,83 @@ async function testDiskActivityAndThroughput() {
     "(indicator) cache hit reports no disk activity");
 }
 
+async function testHybridBundleFetchDedupeAndOffline() {
+  const bundlePayload = Buffer.concat([Buffer.from("CHUNK_ZERO_BYTES"), Buffer.from("CHUNK_ONE_BYTES!")]);
+  const bundleManifest = {
+    v: 1,
+    buildId: "test",
+    chunkSize: 131072,
+    files: ["b-core-000.pack"],
+    entries: [
+      [0, 0, 0, 16],
+      [1, 0, 16, 16],
+    ],
+  };
+
+  let bundleFetches = 0;
+  let headFetches = 0;
+  const d = loadWorker({
+    fetchImpl: async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("chunks-precache.json")) {
+        return new Response(JSON.stringify(REAL_LIST), { status: 200 });
+      }
+      if (url.endsWith("bundles.json")) {
+        return new Response(JSON.stringify(bundleManifest), { status: 200 });
+      }
+      if (init && init.method === "HEAD") {
+        headFetches++;
+        return new Response(null, { status: 200 });
+      }
+      if (url.endsWith("b-core-000.pack")) {
+        bundleFetches++;
+        await new Promise((r) => setTimeout(r, 15));
+        return new Response(bundlePayload, {
+          status: 200,
+          headers: { "Content-Length": String(bundlePayload.length) },
+        });
+      }
+      return new Response("", { status: 404 });
+    },
+  });
+  await seedEmptyTemplate(d);
+
+  // HEAD on bundled chunk must answer from bundles.json with 0 network fetches!
+  const headRes = await d.dispatchFetch(new Request(PROD_ORIGIN + "/images/debian-chunks/" + REAL_LIST[0], { method: "HEAD" }));
+  check(headRes.status === 200 && headRes.headers.get("Content-Length") === "16" && headFetches === 0,
+    "(bundle) HEAD answers exact Content-Length from bundles.json with 0 network fetches");
+
+  // Two concurrent GETs for sibling chunks in the SAME bundle -> ONLY 1 bundle fetch!
+  const [r0, r1] = await Promise.all([
+    d.dispatchFetch(chunkRequest(REAL_LIST[0])),
+    d.dispatchFetch(chunkRequest(REAL_LIST[1])),
+  ]);
+  check((await r0.text()) === "CHUNK_ZERO_BYTES" && (await r1.text()) === "CHUNK_ONE_BYTES!",
+    "(bundle) concurrent requests unpack exact sibling chunk slices");
+  check(bundleFetches === 1,
+    `(bundle) in-flight deduplication made 1 bundle fetch for 2 concurrent chunks (got ${bundleFetches})`);
+
+  // Subsequent read of sibling chunk hits GL_DATA_CACHE with 0 network fetches!
+  const r1Again = await d.dispatchFetch(chunkRequest(REAL_LIST[1]));
+  check((await r1Again.text()) === "CHUNK_ONE_BYTES!" && bundleFetches === 1,
+    "(bundle) unpacked sibling chunk served from GL_DATA_CACHE with 0 network fetches");
+
+  // Offline bundle fetch -> 408 + chunk-offline (never zeros, never out-of-date)
+  const dOff = loadWorker({
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("chunks-precache.json")) return new Response(JSON.stringify(REAL_LIST), { status: 200 });
+      if (url.endsWith("bundles.json")) return new Response(JSON.stringify(bundleManifest), { status: 200 });
+      throw new Error("offline");
+    },
+  });
+  await seedEmptyTemplate(dOff);
+  const rOff = await dOff.dispatchFetch(chunkRequest(REAL_LIST[0]));
+  check(rOff.status === 408 && dOff.messages.some((m) => m.type === "chunk-offline") &&
+        !dOff.messages.some((m) => m.type === "chunk-missing-real"),
+    "(bundle) offline bundle fetch returns 408 + chunk-offline (never zeros)");
+}
+
 function testPageMessageContract() {
   const mainJs = fs.readFileSync(path.join(ROOT, "js/main.js"), "utf8");
   check(/data\.type === "chunk-missing-real"/.test(mainJs), "(page) js/main.js handles chunk-missing-real");
@@ -389,6 +475,7 @@ function testPageMessageContract() {
     testOverrideLocalhostOnlyAndRestart,
     testPackListAndPackQueryBypass,
     testDiskActivityAndThroughput,
+    testHybridBundleFetchDedupeAndOffline,
     testPageMessageContract,
   ];
   for (const t of tests) {

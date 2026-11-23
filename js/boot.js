@@ -20,7 +20,8 @@ import { attachKeyboardInterceptor } from "./keybar.js";
 const FRESH_MOTD = [
   "",
   "  \x1b[1;32mGoLinux\x1b[0m \x1b[2m· Debian 12 (bookworm) i386 · local WebAssembly VM\x1b[0m",
-  "  \x1b[36mTools:\x1b[0m bash, coreutils, git, gcc/g++, make, man, nano, curl",
+  "  \x1b[36mTools:\x1b[0m gcc/g++, python3, git, make, vim, nano, tmux, htop, jq, tree, man",
+  "  \x1b[35mFun:\x1b[0m   fastfetch, neofetch, cowsay, figlet, sl",
   "  \x1b[2mOffline-safe (no guest network) · /root persists locally · transfer via /mnt/host\x1b[0m",
   "",
 ].join("\r\n");

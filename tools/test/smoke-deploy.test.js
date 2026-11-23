@@ -65,7 +65,7 @@ function serve(root, opts = {}) {
       res.setHeader("Access-Control-Allow-Methods", "GET, HEAD");
       res.setHeader("Access-Control-Allow-Headers", "Range, If-None-Match, If-Modified-Since");
       res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range, ETag");
-      if (!/^(images\/debian-chunks\/|packs\/)/.test(rel)) {
+      if (!/^(images\/debian-chunks\/|bundles\/|packs\/)/.test(rel)) {
         log[log.length - 1].status = 404;
         return res.writeHead(404).end("not in bucket");
       }
@@ -74,7 +74,7 @@ function serve(root, opts = {}) {
         log[log.length - 1].status = 404;
         return res.writeHead(404).end("not stored");
       }
-    } else if (rel.startsWith("images/debian-chunks/") || rel.startsWith("packs/")) {
+    } else if (rel.startsWith("images/debian-chunks/") || rel.startsWith("bundles/") || rel.startsWith("packs/")) {
       log[log.length - 1].status = 404;
       return res.writeHead(404).end("not on app origin");
     }
@@ -93,7 +93,7 @@ function serve(root, opts = {}) {
     });
     if (req.method === "HEAD") return res.end();
     const t = opts.throttle;
-    if (!t || !/\/debian-chunks\//.test(rel)) return res.end(body);
+    if (!t || (!/\/debian-chunks\//.test(rel) && !/^bundles\//.test(rel))) return res.end(body);
     setTimeout(() => {
       const slice = 16 * 1024;
       const stepMs = (slice / t.bps) * 1000;
@@ -119,6 +119,14 @@ function stageR2Mirror(dest, buildId) {
   fs.mkdirSync(chunkDst, { recursive: true });
   for (const name of manifest.real) fs.linkSync(path.join(srcDir, name), path.join(chunkDst, name));
   fs.linkSync(path.join(srcDir, "empty-chunk.zst"), path.join(chunkDst, "empty-chunk.zst"));
+  const bundleSrc = path.join(ROOT, "images", "debian-bundles", buildId);
+  const bundleDst = path.join(dest, "bundles", buildId);
+  fs.mkdirSync(bundleDst, { recursive: true });
+  if (fs.existsSync(bundleSrc)) {
+    for (const f of fs.readdirSync(bundleSrc)) {
+      if (f.endsWith(".pack")) fs.linkSync(path.join(bundleSrc, f), path.join(bundleDst, f));
+    }
+  }
   const packDst = path.join(dest, "packs", buildId);
   fs.mkdirSync(packDst, { recursive: true });
   for (const f of fs.readdirSync(path.join(ROOT, "packs"))) {
@@ -466,9 +474,9 @@ async function launchChrome(profileDir, port) {
     await focusTerm(cdp);
     await typeText(cdp, "nano /root/n.txt");
     await pressEnter(cdp);
-    await sleep(2000);
+    await waitScreen(cdp, /GNU nano/, 30000, "nano opens");
     await pressCtrl(cdp, "x");
-    await sleep(1000);
+    await waitScreen(cdp, /nano \/root\/n\.txt[\s\S]*root@golinux:~#/, 15000, "nano exits");
     await setUserTyping(cdp, false);
     const nanoCheck = JSON.parse((await cdp.send("Runtime.evaluate", {
       expression: `(() => {
@@ -484,6 +492,19 @@ async function launchChrome(profileDir, port) {
     })).result.value);
     check(nanoCheck.nanoLines === 0, `nano leaves zero residue in buffer (found ${nanoCheck.nanoLines})`);
     check(nanoCheck.baseY === baseBeforeNano, `nano adds zero scrollback lines (${baseBeforeNano} -> ${nanoCheck.baseY})`);
+
+    // Verify newly added CLI tools (fastfetch, cowsay, python3, jq, tree)
+    console.log("\n== new CLI tools (fastfetch, cowsay, python3, jq, tree) ==");
+    await setUserTyping(cdp, true);
+    const toolsOut = await runCmd(
+      cdp,
+      "fastfetch >/dev/null && cowsay HI_MOO | grep -q HI_MOO && python3 -c 'print(6*7)' && echo '{\"v\":9}' | jq -r .v && tree -L 1 /root >/dev/null && echo NEW_TOOLS_OK",
+      /42[\s\S]*9[\s\S]*NEW_TOOLS_OK/,
+      90000,
+      "new CLI tools check"
+    );
+    await setUserTyping(cdp, false);
+    check(/NEW_TOOLS_OK/.test(toolsOut), "fastfetch, cowsay, python3, jq, tree all work cleanly");
 
     /* --- 4. Out-of-band virtio-console resize preserves half-typed command --- */
     console.log("\n== virtio-console out-of-band resize ==");
@@ -695,16 +716,18 @@ async function launchChrome(profileDir, port) {
     /* --- 10. Network assertions --- */
     console.log("\n== network assertions ==");
     const chunkHits = (log) => log.filter((r) => /\/debian-chunks\/(?:[^/]+\/)?chunk-\d+-\d+\.zst$/.test(r.path));
+    const bundleHits = (log) => log.filter((r) => /\/bundles\/[^/]+\/b-[^/]+\.pack$/.test(r.path));
     const assetChunks = chunkHits(assetLog);
     const appChunks = chunkHits(appLog);
-    check(assetChunks.length > 0, `guest fetched ${assetChunks.length} chunks from asset origin`);
-    check(appChunks.length === 0, "zero chunk requests reached app origin");
-    const prefixed = `/images/debian-chunks/${buildId}/`;
-    check(assetChunks.every((r) => r.path.startsWith(prefixed)), `every chunk path carries buildId ${buildId}`);
-    const realHits = assetChunks.filter((r) => staged.real.has(path.basename(r.path)));
-    check(realHits.length > 0 && realHits.every((r) => r.status === 200), "every real chunk returned 200");
-    const zeroHits = assetChunks.filter((r) => !staged.real.has(path.basename(r.path)));
-    check(zeroHits.every((r) => r.status === 404), "every zeroed chunk 404ed on R2 mirror");
+    const assetBundles = bundleHits(assetLog);
+    const appBundles = bundleHits(appLog);
+    check(assetBundles.length > 0, `guest fetched ${assetBundles.length} hybrid .pack bundles from asset origin`);
+    check(assetBundles.length < 60, `hybrid bundling kept total R2 bundle fetches compact (${assetBundles.length} < 60)`);
+    check(assetChunks.length === 0, `zero individual .zst chunk fetches or 404s hit asset origin (got ${assetChunks.length})`);
+    check(appChunks.length === 0 && appBundles.length === 0, "zero chunk/bundle requests reached app origin");
+    const bundlePrefix = `/bundles/${buildId}/`;
+    check(assetBundles.every((r) => r.path.startsWith(bundlePrefix) && r.status === 200),
+      `every bundle path carries buildId ${buildId} and returned 200`);
   } catch (e) {
     bad(e.stack || e.message);
   } finally {

@@ -34,6 +34,20 @@ apt-get install -y --no-install-recommends \
   manpages-dev \
   less \
   nano \
+  vim-tiny \
+  tree \
+  htop \
+  jq \
+  tmux \
+  file \
+  bc \
+  zip \
+  unzip \
+  python3 \
+  neofetch \
+  cowsay \
+  figlet \
+  sl \
   curl \
   ca-certificates \
   gcc \
@@ -44,6 +58,47 @@ apt-get install -y --no-install-recommends \
   sysvinit-core \
   initscripts \
   linux-image-686
+
+# Expose /usr/games tools (cowsay, cowthink, sl) and vim on default PATH
+for bin in cowsay cowthink sl; do
+  [ -x "/usr/games/$bin" ] && ln -sf "/usr/games/$bin" "/usr/local/bin/$bin"
+done
+[ -x /usr/bin/vim.tiny ] && [ ! -e /usr/local/bin/vim ] && ln -sf /usr/bin/vim.tiny /usr/local/bin/vim
+
+# Lightweight instant fastfetch (Debian 12 bookworm has no native fastfetch pkg;
+# this runs in <50ms inside v86 with zero external dependencies).
+cat > /usr/local/bin/fastfetch <<'FFEOF'
+#!/bin/bash
+R='\033[0m'; B='\033[1m'; G='\033[1;32m'; C='\033[1;36m'; BL='\033[1;34m'; D='\033[2m'
+HOST=$(hostname 2>/dev/null || echo golinux)
+KERN=$(uname -r)
+ARCH=$(uname -m)
+UP_SEC=$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)
+UP_H=$((UP_SEC / 3600)); UP_M=$(((UP_SEC % 3600) / 60)); UP_S=$((UP_SEC % 60))
+[ "$UP_H" -gt 0 ] && UP="${UP_H}h ${UP_M}m" || UP="${UP_M}m ${UP_S}s"
+MEM_TOT=$(awk '/MemTotal:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 256)
+MEM_AVAIL=$(awk '/MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 180)
+MEM_USED=$((MEM_TOT - MEM_AVAIL))
+DISK=$(df -h / 2>/dev/null | awk 'NR==2{print $3 " / " $2 " (" $5 ")"}')
+PKGS=$(dpkg-query -f '.\n' -W 2>/dev/null | wc -l)
+SHELL_VER="bash ${BASH_VERSION%%(*}"
+TERM_NAME="${TERM:-xterm-256color}"
+
+printf "\n"
+printf "   ${G}   _____        __    _                 ${R}   ${G}${USER:-root}${R}@${G}${HOST}${R}\n"
+printf "   ${G}  / ____|      / /   (_)                ${R}   ${D}--------------------------${R}\n"
+printf "   ${G} | |  __  ___ / /     _ _ __  _   ___  _${R}   ${BL}OS${R}: Debian GNU/Linux 12 (bookworm) ${ARCH}\n"
+printf "   ${G} | | |_ |/ _ \\\\ \\\\    | | '_ \\\\| | | \\\\ \\\\/ /${R}   ${BL}Host${R}: v86 WebAssembly VM (Browser)\n"
+printf "   ${G} | |__| | (_) | |___| | | | | |_| |>  < ${R}   ${BL}Kernel${R}: Linux ${KERN}\n"
+printf "   ${G}  \\\\_____|\\\\___/|_____|_|_| |_|\\\\__,_/_/\\\\_\\\\${R}   ${BL}Uptime${R}: ${UP}\n"
+printf "   ${C}                                        ${R}   ${BL}Packages${R}: ${PKGS} (dpkg)\n"
+printf "   ${C}   100%% Local · Zero Server · Offline   ${R}   ${BL}Shell${R}: ${SHELL_VER}\n"
+printf "   ${D}         terminal.golinux.app           ${R}   ${BL}Terminal${R}: ${TERM_NAME}\n"
+printf "                                              ${BL}Memory${R}: ${MEM_USED} MiB / ${MEM_TOT} MiB\n"
+printf "                                              ${BL}Disk (/)${R}: ${DISK}\n"
+printf "                                              \033[40m   \033[41m   \033[42m   \033[43m   \033[44m   \033[45m   \033[46m   \033[47m   ${R}\n\n"
+FFEOF
+chmod +x /usr/local/bin/fastfetch
 
 # 3. coreutils and util-linux ship in the base image, so they were unpacked
 #    while path-exclude was still active. Force them to be extracted again now
@@ -80,14 +135,14 @@ EOF
 
 printf '%s\n' \
   'export HOME=/root' \
-  'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+  'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games' \
   'export LANG=C.UTF-8' \
   '[ -f /root/.bashrc ] && . /root/.bashrc' \
   'cd /root 2>/dev/null || cd /' \
   > /root/.bash_profile
 
 cat > /root/.bashrc <<'EOF'
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games
 export CLICOLOR=1
 export LS_COLORS='di=1;34:ln=1;36:ex=1;32:so=1;35:pi=33:bd=1;33:cd=1;33:*.tar=1;31:*.tgz=1;31:*.gz=1;31:*.zip=1;31:*.zst=1;31:*.c=38;5;114:*.h=38;5;110:*.cpp=38;5;114:*.py=38;5;221:*.sh=1;32:*.md=38;5;183:*.json=38;5;215'
 alias ls='ls --color=auto'

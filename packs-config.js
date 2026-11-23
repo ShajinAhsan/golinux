@@ -11,7 +11,7 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v19";
+const GL_VERSION = "v20";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
  * (e.g. virtio_console, memory_size) changes so incompatible saved OPFS states
@@ -68,6 +68,7 @@ const GL_SHELL_FILES = Object.freeze([
   "images/debian-initrd",
   "assets/empty-chunk.zst",
   "chunks-precache.json",
+  "bundles.json",
   "icons/icon-192.png",
   "icons/icon-512.png",
 ]);
@@ -129,6 +130,10 @@ const GL_CHUNK_PATH = GL_BUILD_ID
   ? `images/debian-chunks/${GL_BUILD_ID}/`
   : "images/debian-chunks/";
 
+const GL_BUNDLES_PATH = GL_BUILD_ID
+  ? `bundles/${GL_BUILD_ID}/`
+  : "images/debian-bundles/";
+
 /* The zeroed chunk used as the 404 / offline fallback for known-empty chunks. */
 const GL_EMPTY_CHUNK_PATH = "assets/empty-chunk.zst";
 const GL_PACKS_PATH = GL_BUILD_ID ? `packs/${GL_BUILD_ID}/` : "packs/";
@@ -136,6 +141,11 @@ const GL_PACKS_PATH = GL_BUILD_ID ? `packs/${GL_BUILD_ID}/` : "packs/";
 /** Full URL for a chunk filename. */
 function glChunkUrl(name) {
   return GL_ASSET_BASE + "/" + GL_CHUNK_PATH + name;
+}
+
+/** Full URL for a hybrid chunk bundle file. */
+function glBundleUrl(file) {
+  return GL_ASSET_BASE + "/" + GL_BUNDLES_PATH + file;
 }
 
 /** Full URL for a pack list or the pack index. */

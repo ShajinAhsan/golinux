@@ -161,7 +161,7 @@ const emulator = new V86({
 emulator.add_listener("serial0-output-byte", byte => {
   text += String.fromCharCode(byte);
 
-  if (phase === 0 && /root@golinux:~#/.test(text)) {
+  if (phase === 0 && /root@golinux:~#/.test(text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""))) {
     phase = 1;
     console.error(`[packs] shell up, starting recording + ${COMMON_COMMANDS.length} commands`);
     recording.on = true;

@@ -107,6 +107,11 @@ if [ ! -f "$ROOT/chunks-precache.json" ]; then
   exit 1
 fi
 cp "$ROOT/chunks-precache.json" "$OUT"/chunks-precache.json
+if [ ! -f "$ROOT/bundles.json" ]; then
+  echo "ERROR: bundles.json is missing — run: node tools/image/build-bundles.js" >&2
+  exit 1
+fi
+cp "$ROOT/bundles.json" "$OUT"/bundles.json
 cp "$ROOT"/images/debian-bzImage "$ROOT"/images/debian-initrd \
    "$ROOT"/images/debian-state.bin.zst "$ROOT"/images/build-id.json "$OUT/images/"
 if [ -n "$OVERRIDE_BUILD_ID" ]; then

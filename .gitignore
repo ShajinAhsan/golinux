@@ -5,8 +5,10 @@
 # The raw Debian disk image (~745 MB)
 images/debian.img
 
-# All disk chunks: 40,960 files, plus the manifest and the per-build dirs
+# All disk chunks and hybrid bundles: generated from debian.img
 images/debian-chunks/
+images/debian-bundles/
+bundles.json
 
 # Machine state (snapshot) and the boot fallback artifacts
 images/debian-state.bin

@@ -96,10 +96,13 @@ self.addEventListener("message", (event) => {
   }
 });
 
-/* ---------- real chunk manifest ---------- */
+/* ---------- real chunk manifest + hybrid bundle index ---------- */
 
 let realChunkSet = null;
 let realChunkPromise = null;
+let bundleIndex = null;      // { chunkToBundle: Map<name, {file, off, len}>, bundleToChunks: Map<file, Array<{name, off, len}>> }
+let bundleIndexPromise = null;
+const inflightBundles = new Map(); // file -> Promise<{ status, map?: Map<name, ArrayBuffer>, response?: Response }>
 
 function loadRealChunks() {
   if (realChunkSet) return Promise.resolve(realChunkSet);
@@ -138,6 +141,110 @@ function loadRealChunks() {
     }
   })();
   return realChunkPromise;
+}
+
+function loadBundleIndex() {
+  if (bundleIndex) return Promise.resolve(bundleIndex);
+  if (bundleIndexPromise) return bundleIndexPromise;
+  bundleIndexPromise = (async () => {
+    try {
+      let data = null;
+      try {
+        const shell = await caches.open(GL_SHELL_CACHE);
+        const cached = await shell.match("bundles.json", { ignoreSearch: true });
+        if (cached && cached.ok) data = await cached.json();
+      } catch (e) { /* fall through */ }
+
+      if (!data) {
+        const res = await fetch("bundles.json", { cache: "no-store" });
+        if (!res.ok) {
+          bundleIndexPromise = null;
+          return null;
+        }
+        data = await res.json();
+      }
+
+      if (!data || !Array.isArray(data.files) || !Array.isArray(data.entries)) {
+        bundleIndexPromise = null;
+        return null;
+      }
+
+      const chunkSize = Number(data.chunkSize) || (128 * 1024);
+      const chunkToBundle = new Map();
+      const bundleToChunks = new Map();
+      for (const f of data.files) bundleToChunks.set(f, []);
+      for (const row of data.entries) {
+        const [idx, fileIdx, off, len] = row;
+        const file = data.files[fileIdx];
+        if (!file) continue;
+        const start = idx * chunkSize;
+        const name = `chunk-${start}-${start + chunkSize}.zst`;
+        const meta = { file, off, len };
+        chunkToBundle.set(name, meta);
+        bundleToChunks.get(file).push({ name, off, len });
+      }
+      bundleIndex = { chunkToBundle, bundleToChunks };
+      return bundleIndex;
+    } catch (e) {
+      bundleIndexPromise = null;
+      return null;
+    }
+  })();
+  return bundleIndexPromise;
+}
+
+/**
+ * Fetch a hybrid .pack bundle once (deduplicated across concurrent chunk reads),
+ * slice every .zst chunk inside it directly into GL_DATA_CACHE, and return a
+ * transient Map<chunkName, ArrayBuffer> for all waiting callers.
+ */
+function fetchAndUnpackBundle(file, triggerName, pathnamePrefix) {
+  if (inflightBundles.has(file)) return inflightBundles.get(file);
+
+  const p = (async () => {
+    beginDiskRead();
+    const fetchStart = Date.now();
+    const bundleUrl = glBundleUrl(file);
+    try {
+      const response = await fetch(bundleUrl);
+      if (!response.ok) {
+        endDiskRead(false, 0);
+        return { status: response.status, response };
+      }
+      const buf = await response.arrayBuffer();
+      const idx = await loadBundleIndex();
+      const members = (idx && idx.bundleToChunks.get(file)) || [];
+      const cache = await caches.open(GL_DATA_CACHE);
+      const map = new Map();
+      const puts = [];
+      for (const m of members) {
+        const slice = buf.slice(m.off, m.off + m.len);
+        map.set(m.name, slice);
+        const key = new Request(self.location.origin + pathnamePrefix + m.name, { method: "GET" });
+        const resp = new Response(slice, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/zstd",
+            "Content-Length": String(slice.byteLength),
+          },
+        });
+        puts.push(cache.put(key, resp).catch(() => {}));
+      }
+      await Promise.all(puts);
+      noteThroughput(buf.byteLength, Date.now() - fetchStart);
+      endDiskRead(true, buf.byteLength, triggerName);
+      return { status: 200, map };
+    } catch (e) {
+      endDiskRead(false, 0);
+      return { status: 0, error: e };
+    }
+  })();
+
+  inflightBundles.set(file, p);
+  p.finally(() => {
+    if (inflightBundles.get(file) === p) inflightBundles.delete(file);
+  });
+  return p;
 }
 
 /**
@@ -297,6 +404,22 @@ self.addEventListener("fetch", (event) => {
         const cacheKey = new Request(self.location.origin + url.pathname, { method: "GET" });
         const hit = await headFromCache(cacheKey, [GL_PACK_CACHE, GL_DATA_CACHE]);
         if (hit) return hit;
+
+        const name = url.pathname.split("/").pop();
+        if (await isEmptyChunkName(name)) {
+          const emptyHead = await headFromCache(GL_EMPTY_CHUNK_PATH, [GL_SHELL_CACHE]);
+          if (emptyHead) return emptyHead;
+        }
+        const idx = await loadBundleIndex();
+        const bMeta = idx && idx.chunkToBundle.get(name);
+        if (bMeta) {
+          return new Response(null, {
+            status: 200,
+            statusText: "OK",
+            headers: { "Content-Length": String(bMeta.len) },
+          });
+        }
+
         const upstream = GL_ASSET_BASE ? GL_ASSET_BASE + url.pathname : request.url;
         try {
           return await fetch(upstream, { method: "HEAD" });
@@ -326,17 +449,55 @@ self.addEventListener("fetch", (event) => {
       await assetBaseReady;
 
       const cacheKey = new Request(self.location.origin + url.pathname, { method: "GET" });
-      const upstream = GL_ASSET_BASE ? GL_ASSET_BASE + url.pathname : request;
-
-      for (const name of [GL_PACK_CACHE, GL_DATA_CACHE]) {
-        const cache = await caches.open(name);
+      for (const cname of [GL_PACK_CACHE, GL_DATA_CACHE]) {
+        const cache = await caches.open(cname);
         const hit = await cache.match(cacheKey, { ignoreSearch: true });
         if (hit) return hit;
       }
 
+      const name = url.pathname.split("/").pop();
+      const pathnamePrefix = url.pathname.slice(0, url.pathname.length - name.length);
+
+      // Step 1: Short-circuit known-empty chunks locally BEFORE any network
+      // fetch — 0 ms latency and 0 R2 404 Class B operations.
+      if (await isEmptyChunkName(name)) {
+        const shell = await caches.open(GL_SHELL_CACHE);
+        const empty = await shell.match(GL_EMPTY_CHUNK_PATH, { ignoreSearch: true });
+        if (empty) return empty;
+      }
+
+      // Step 2: Hybrid bundle fetch — fetch the small .pack bundle containing
+      // this chunk once (deduplicated across concurrent reads) and unpack all
+      // sibling chunks into GL_DATA_CACHE in <1 ms.
+      const idx = await loadBundleIndex();
+      const bMeta = idx && idx.chunkToBundle.get(name);
+      if (bMeta) {
+        const res = await fetchAndUnpackBundle(bMeta.file, name, pathnamePrefix);
+        if (res.status === 200 && res.map && res.map.has(name)) {
+          const slice = res.map.get(name);
+          return new Response(slice, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/zstd",
+              "Content-Length": String(slice.byteLength),
+            },
+          });
+        }
+        if (res.status === 404) {
+          broadcast({ type: "chunk-missing-real", url: request.url, name });
+          return new Response("", { status: 404, statusText: "bundle missing" });
+        }
+        if (res.status === 0) {
+          broadcast({ type: "chunk-offline", url: request.url, name });
+          return new Response("", { status: 408, statusText: "bundle unavailable offline" });
+        }
+        return res.response || new Response("", { status: res.status || 502 });
+      }
+
+      // Fallback: direct single-chunk fetch (used only when bundles.json is absent).
+      const upstream = GL_ASSET_BASE ? GL_ASSET_BASE + url.pathname : request;
       beginDiskRead();
       const fetchStart = Date.now();
-      const name = url.pathname.split("/").pop();
       try {
         const response = await fetch(upstream);
         if (response.ok) {
@@ -368,9 +529,6 @@ self.addEventListener("fetch", (event) => {
           const empty = await shell.match(GL_EMPTY_CHUNK_PATH, { ignoreSearch: true });
           if (empty) return empty;
         }
-        // Real chunk unavailable offline: tell the page to show the offline
-        // banner (NOT "out of date") and return 408 (outside 5xx so v86 does
-        // not spin an infinite background retry loop).
         broadcast({ type: "chunk-offline", url: request.url, name });
         return new Response("", { status: 408, statusText: "chunk unavailable offline" });
       }

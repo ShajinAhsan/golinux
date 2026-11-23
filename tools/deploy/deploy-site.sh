@@ -214,12 +214,12 @@ check_tools_json() {
   [ "$code" = "200" ] && [ "$cors" = "$TERMINAL_URL" ]
 }
 
-check_one_chunk() {
-  local chunk
-  chunk="$(node -e 'process.stdout.write(require(process.argv[1])[0])' \
-    "$ROOT/chunks-precache.json")"
-  [ -n "$chunk" ] || return 1
-  local url="$ASSET_ORIGIN/images/debian-chunks/$BUILD_ID/$chunk?cb=$(cb)"
+check_one_bundle() {
+  local bfile
+  bfile="$(node -e 'process.stdout.write(require(process.argv[1]).files[0] || "")' \
+    "$ROOT/bundles.json")"
+  [ -n "$bfile" ] || return 1
+  local url="$ASSET_ORIGIN/bundles/$BUILD_ID/$bfile?cb=$(cb)"
   local code cors
   code="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -H "Origin: $TERMINAL_URL" "$url")"
   cors="$(curl -sSI -m 30 -H "Origin: $TERMINAL_URL" "$url" \
@@ -243,7 +243,7 @@ retry "packs-config.js has GL_ASSET_ORIGIN $EXPECTED_ASSET_ORIGIN and GL_BUILD_I
 retry "chunks-precache.json returns 200" 6 check_precache_200 || FAILED=1
 retry "sw.js Cache-Control is no-cache and not concatenated" 6 check_sw_cache_control || FAILED=1
 retry "packs/$BUILD_ID/tools.json returns 200 with CORS for $TERMINAL_URL" 6 check_tools_json || FAILED=1
-retry "a real chunk on the asset origin returns 200 with CORS for $TERMINAL_URL" 6 check_one_chunk || FAILED=1
+retry "a real hybrid bundle on the asset origin returns 200 with CORS for $TERMINAL_URL" 6 check_one_bundle || FAILED=1
 
 echo
 if [ "$FAILED" -ne 0 ]; then
