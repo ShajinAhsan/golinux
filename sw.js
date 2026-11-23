@@ -100,9 +100,62 @@ self.addEventListener("message", (event) => {
 
 let realChunkSet = null;
 let realChunkPromise = null;
+let emptyChunkBytes = null;
+let emptyChunkPromise = null;
 let bundleIndex = null;      // { chunkToBundle: Map<name, {file, off, len}>, bundleToChunks: Map<file, Array<{name, off, len}>> }
 let bundleIndexPromise = null;
 const inflightBundles = new Map(); // file -> Promise<{ status, map?: Map<name, ArrayBuffer>, response?: Response }>
+
+/**
+ * Return the 25-byte empty-chunk.zst response even if the user cleared Cache
+ * Storage while this SW remained active in memory.
+ */
+async function getEmptyChunkResponse(headOnly) {
+  if (!emptyChunkBytes) {
+    if (!emptyChunkPromise) {
+      emptyChunkPromise = (async () => {
+        try {
+          const shell = await caches.open(GL_SHELL_CACHE);
+          const cached = await shell.match(GL_EMPTY_CHUNK_PATH, { ignoreSearch: true });
+          if (cached && cached.ok) {
+            emptyChunkBytes = await cached.arrayBuffer();
+            return emptyChunkBytes;
+          }
+        } catch (e) { /* fall through to network */ }
+        try {
+          const res = await fetch(GL_EMPTY_CHUNK_PATH, { cache: "no-store" });
+          if (res.ok) {
+            const buf = await res.arrayBuffer();
+            emptyChunkBytes = buf;
+            caches.open(GL_SHELL_CACHE).then((c) => c.put(
+              GL_EMPTY_CHUNK_PATH,
+              new Response(buf.slice(0), {
+                status: 200,
+                headers: {
+                  "Content-Type": "application/zstd",
+                  "Content-Length": String(buf.byteLength),
+                },
+              })
+            )).catch(() => {});
+            return emptyChunkBytes;
+          }
+        } catch (e) { /* offline and cache wiped */ }
+        emptyChunkPromise = null;
+        return null;
+      })();
+    }
+    await emptyChunkPromise;
+  }
+  if (!emptyChunkBytes) return null;
+  return new Response(headOnly ? null : emptyChunkBytes.slice(0), {
+    status: 200,
+    statusText: "OK",
+    headers: {
+      "Content-Type": "application/zstd",
+      "Content-Length": String(emptyChunkBytes.byteLength),
+    },
+  });
+}
 
 function loadRealChunks() {
   if (realChunkSet) return Promise.resolve(realChunkSet);
@@ -214,23 +267,25 @@ function fetchAndUnpackBundle(file, triggerName, pathnamePrefix) {
       const buf = await response.arrayBuffer();
       const idx = await loadBundleIndex();
       const members = (idx && idx.bundleToChunks.get(file)) || [];
-      const cache = await caches.open(GL_DATA_CACHE);
+      const cache = await caches.open(GL_DATA_CACHE).catch(() => null);
       const map = new Map();
       const puts = [];
       for (const m of members) {
         const slice = buf.slice(m.off, m.off + m.len);
         map.set(m.name, slice);
-        const key = new Request(self.location.origin + pathnamePrefix + m.name, { method: "GET" });
-        const resp = new Response(slice, {
-          status: 200,
-          headers: {
-            "Content-Type": "application/zstd",
-            "Content-Length": String(slice.byteLength),
-          },
-        });
-        puts.push(cache.put(key, resp).catch(() => {}));
+        if (cache) {
+          const key = new Request(self.location.origin + pathnamePrefix + m.name, { method: "GET" });
+          const resp = new Response(slice, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/zstd",
+              "Content-Length": String(slice.byteLength),
+            },
+          });
+          puts.push(cache.put(key, resp).catch(() => {}));
+        }
       }
-      await Promise.all(puts);
+      if (puts.length) await Promise.all(puts);
       noteThroughput(buf.byteLength, Date.now() - fetchStart);
       endDiskRead(true, buf.byteLength, triggerName);
       return { status: 200, map };
@@ -407,7 +462,7 @@ self.addEventListener("fetch", (event) => {
 
         const name = url.pathname.split("/").pop();
         if (await isEmptyChunkName(name)) {
-          const emptyHead = await headFromCache(GL_EMPTY_CHUNK_PATH, [GL_SHELL_CACHE]);
+          const emptyHead = await getEmptyChunkResponse(true);
           if (emptyHead) return emptyHead;
         }
         const idx = await loadBundleIndex();
@@ -459,10 +514,10 @@ self.addEventListener("fetch", (event) => {
       const pathnamePrefix = url.pathname.slice(0, url.pathname.length - name.length);
 
       // Step 1: Short-circuit known-empty chunks locally BEFORE any network
-      // fetch — 0 ms latency and 0 R2 404 Class B operations.
+      // fetch — 0 ms latency and 0 R2 404 Class B operations (resilient even
+      // if Cache Storage was wiped mid-session).
       if (await isEmptyChunkName(name)) {
-        const shell = await caches.open(GL_SHELL_CACHE);
-        const empty = await shell.match(GL_EMPTY_CHUNK_PATH, { ignoreSearch: true });
+        const empty = await getEmptyChunkResponse(false);
         if (empty) return empty;
       }
 
@@ -512,8 +567,7 @@ self.addEventListener("fetch", (event) => {
         if (response.status === 404) {
           const knownEmpty = await isEmptyChunkName(name);
           if (knownEmpty) {
-            const shell = await caches.open(GL_SHELL_CACHE);
-            const empty = await shell.match(GL_EMPTY_CHUNK_PATH, { ignoreSearch: true });
+            const empty = await getEmptyChunkResponse(false);
             if (empty) return empty;
           }
           broadcast({ type: "chunk-missing-real", url: request.url, name });
@@ -525,8 +579,7 @@ self.addEventListener("fetch", (event) => {
         endDiskRead(false, 0);
         const knownEmpty = await isEmptyChunkName(name);
         if (knownEmpty) {
-          const shell = await caches.open(GL_SHELL_CACHE);
-          const empty = await shell.match(GL_EMPTY_CHUNK_PATH, { ignoreSearch: true });
+          const empty = await getEmptyChunkResponse(false);
           if (empty) return empty;
         }
         broadcast({ type: "chunk-offline", url: request.url, name });

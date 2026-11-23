@@ -270,7 +270,7 @@ if (fs.existsSync(INSTALL_SH)) {
 // No runtime file outside keybar/tools may call serial0_send (INV-1).
 const RUNTIME_CHECK = [
   "index.html", "terminal.html", "worker.js", "sw.js", "persist.js", "persist-9p.js", "packs.js",
-  "js/landing.js", "js/main.js", "js/status.js", "js/boot.js", "js/terminal.js",
+  "js/landing.js", "js/main.js", "js/status.js", "js/boot.js", "js/chunk-fallback.js", "js/terminal.js",
   "js/persist-ui.js", "js/packs-ui.js", "js/transfer.js", "js/tool-progress.js",
 ];
 for (const rel of RUNTIME_CHECK) {

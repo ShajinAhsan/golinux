@@ -11,7 +11,7 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v20";
+const GL_VERSION = "v21";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
  * (e.g. virtio_console, memory_size) changes so incompatible saved OPFS states
@@ -51,6 +51,7 @@ const GL_SHELL_FILES = Object.freeze([
   "js/main.js",
   "js/status.js",
   "js/boot.js",
+  "js/chunk-fallback.js",
   "js/terminal.js",
   "js/keybar.js",
   "js/persist-ui.js",

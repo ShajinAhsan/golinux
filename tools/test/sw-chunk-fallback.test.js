@@ -454,6 +454,22 @@ async function testHybridBundleFetchDedupeAndOffline() {
   check(rOff.status === 408 && dOff.messages.some((m) => m.type === "chunk-offline") &&
         !dOff.messages.some((m) => m.type === "chunk-missing-real"),
     "(bundle) offline bundle fetch returns 408 + chunk-offline (never zeros)");
+
+  // Cache Storage wiped mid-session while SW is alive -> empty chunk still recovers from network/RAM!
+  const dWipe = loadWorker({
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("chunks-precache.json")) return new Response(JSON.stringify(REAL_LIST), { status: 200 });
+      if (url.endsWith("bundles.json")) return new Response(JSON.stringify(bundleManifest), { status: 200 });
+      if (url.endsWith("assets/empty-chunk.zst")) return new Response("ZEROBYTES", { status: 200 });
+      return new Response("", { status: 404 });
+    },
+  });
+  // Intentionally do NOT seed GL_SHELL_CACHE (simulates user deleting Cache Storage mid-session!)
+  const rWipe = await dWipe.dispatchFetch(chunkRequest(EMPTY_NAME));
+  check(rWipe.status === 200 && (await rWipe.text()) === "ZEROBYTES" &&
+        !dWipe.messages.some((m) => m.type === "chunk-missing-real"),
+    "(wipe) empty chunk recovers cleanly when Cache Storage was deleted mid-session");
 }
 
 function testPageMessageContract() {

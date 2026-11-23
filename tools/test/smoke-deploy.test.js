@@ -506,8 +506,21 @@ async function launchChrome(profileDir, port) {
     await setUserTyping(cdp, false);
     check(/NEW_TOOLS_OK/.test(toolsOut), "fastfetch, cowsay, python3, jq, tree all work cleanly");
 
-    /* --- 4. Out-of-band virtio-console resize preserves half-typed command --- */
+    /* --- 4. Out-of-band virtio-console resize preserves half-typed command & no-newline output --- */
     console.log("\n== virtio-console out-of-band resize ==");
+    await setUserTyping(cdp, true);
+    // Regression: output WITHOUT trailing newline (e.g. printf("Hello World")) must NOT vanish on slight resize!
+    await runCmd(cdp, "printf 'Hello World'", /Hello World/, 15000, "no-newline Hello World");
+    await setUserTyping(cdp, false);
+    await sleep(200);
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1120, height: 860, deviceScaleFactor: 1, mobile: false });
+    await sleep(450);
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(450);
+    const afterNoNlResize = await screenText(cdp);
+    check(afterNoNlResize.includes("Hello World"),
+      "no-newline output ('Hello World') stays visible after slightly resizing window");
+
     await setUserTyping(cdp, true);
     await focusTerm(cdp);
     await typeText(cdp, "echo TYPED_SURVIVES");
@@ -712,6 +725,28 @@ async function launchChrome(profileDir, port) {
       returnByValue: true,
     })).result.value;
     check(bannerAfterOnline === false, "#offlineBanner hides automatically when internet reconnects");
+
+    /* --- 9b. Clearing ALL Cache Storage + unregistering SW mid-session must NOT freeze terminal --- */
+    console.log("\n== clear site data & cache mid-session resilience ==");
+    await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        for (const k of await caches.keys()) await caches.delete(k);
+        for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+      })()`,
+      awaitPromise: true,
+    });
+    await sleep(300);
+    await setUserTyping(cdp, true);
+    const afterWipe = await runCmd(
+      cdp,
+      "clear && ls /root >/dev/null && figlet OK >/dev/null && echo ALIVE_AFTER_WIPE",
+      /ALIVE_AFTER_WIPE[\s\S]*ALIVE_AFTER_WIPE/,
+      45000,
+      "commands after clearing site data & cache mid-session"
+    );
+    await setUserTyping(cdp, false);
+    check(/ALIVE_AFTER_WIPE/.test(afterWipe),
+      "clear, ls, and uncached bundle tool (figlet) keep working without freezing after clearing site data/cache mid-session");
 
     /* --- 10. Network assertions --- */
     console.log("\n== network assertions ==");

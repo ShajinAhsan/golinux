@@ -45,22 +45,64 @@ const BASHRC_CMD =
   "'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games' " +
   "'export CLICOLOR=1' " +
   "'export LS_COLORS=\"di=1;34:ln=1;36:ex=1;32:so=1;35:pi=33:bd=1;33:cd=1;33:*.tar=1;31:*.tgz=1;31:*.gz=1;31:*.zip=1;31:*.zst=1;31:*.c=38;5;114:*.h=38;5;110:*.cpp=38;5;114:*.py=38;5;221:*.sh=1;32:*.md=38;5;183:*.json=38;5;215\"' " +
+  "'shopt -s checkwinsize' " +
   "'alias ls=\"ls --color=auto\"' " +
   "'alias ll=\"ls -alF --color=auto\"' " +
   "'alias la=\"ls -A --color=auto\"' " +
   "'alias grep=\"grep --color=auto\"' " +
+  "'__gl_prompt_sp() { local c=${COLUMNS:-80}; (( c > 1 )) && printf \"\\e[2;7m%%\\e[0m%*s\\r\\e[K\" $((c - 1)) \"\"; }' " +
+  "'PROMPT_COMMAND=__gl_prompt_sp' " +
   "'PS1=\"\\[\\e[1;32m\\]\\u@\\h\\[\\e[0m\\]:\\[\\e[1;34m\\]\\w\\[\\e[0m\\]\\\\$ \"' " +
   "> /root/.bashrc";
+
+// Pure-bash zero-fork fastfetch (reads /proc/* via built-ins only -> <40ms on mobile!)
+const FASTFETCH_LINES = [
+  "#!/bin/bash",
+  "R=$'\\e[0m'; G=$'\\e[1;32m'; C=$'\\e[1;36m'; BL=$'\\e[1;34m'; D=$'\\e[2m'",
+  "read -r HOST < /etc/hostname 2>/dev/null || HOST=golinux",
+  "read -r _ _ KERN _ < /proc/version 2>/dev/null || KERN=6.1",
+  "read -r UP_RAW _ < /proc/uptime 2>/dev/null || UP_RAW=0",
+  "UP_SEC=${UP_RAW%%.*}",
+  "UP_H=$((UP_SEC / 3600)); UP_M=$(((UP_SEC % 3600) / 60)); UP_S=$((UP_SEC % 60))",
+  "if (( UP_H > 0 )); then UP=\"${UP_H}h ${UP_M}m\"; else UP=\"${UP_M}m ${UP_S}s\"; fi",
+  "MEM_TOT=256; MEM_AVAIL=180",
+  "while read -r k v _; do",
+  "  case \"$k\" in",
+  "    MemTotal:) MEM_TOT=$((v / 1024)) ;;",
+  "    MemAvailable:) MEM_AVAIL=$((v / 1024)); break ;;",
+  "  esac",
+  "done < /proc/meminfo 2>/dev/null",
+  "MEM_USED=$((MEM_TOT - MEM_AVAIL))",
+  "SHELL_VER=\"bash ${BASH_VERSION%%(*}\"",
+  "TERM_NAME=\"${TERM:-xterm-256color}\"",
+  "printf '\\n'",
+  "printf '   %s   _____        __    _                 %s   %s%s%s@%s%s%s\\n' \"$G\" \"$R\" \"$G\" \"${USER:-root}\" \"$R\" \"$G\" \"$HOST\" \"$R\"",
+  "printf '   %s  / ____|      / /   (_)                %s   %s--------------------------%s\\n' \"$G\" \"$R\" \"$D\" \"$R\"",
+  "printf '   %s | |  __  ___ / /     _ _ __  _   ___  _%s   %sOS%s: Debian GNU/Linux 12 (bookworm) i686\\n' \"$G\" \"$R\" \"$BL\" \"$R\"",
+  "printf '   %s | | |_ |/ _ \\\\ \\\\    | | '\\''_ \\\\| | | \\\\ \\\\/ /%s   %sHost%s: v86 WebAssembly VM (Browser)\\n' \"$G\" \"$R\" \"$BL\" \"$R\"",
+  "printf '   %s | |__| | (_) | |___| | | | | |_| |>  < %s   %sKernel%s: Linux %s\\n' \"$G\" \"$R\" \"$BL\" \"$R\" \"$KERN\"",
+  "printf '   %s  \\\\_____|\\\\___/|_____|_|_| |_|\\\\__,_/_/\\\\_\\\\%s   %sUptime%s: %s\\n' \"$G\" \"$R\" \"$BL\" \"$R\" \"$UP\"",
+  "printf '   %s   100%% Local · Zero Server · Offline   %s   %sShell%s: %s\\n' \"$C\" \"$R\" \"$BL\" \"$R\" \"$SHELL_VER\"",
+  "printf '   %s         terminal.golinux.app           %s   %sTerminal%s: %s\\n' \"$D\" \"$R\" \"$BL\" \"$R\" \"$TERM_NAME\"",
+  "printf '                                              %sMemory%s: %s MiB / %s MiB\\n' \"$BL\" \"$R\" \"$MEM_USED\" \"$MEM_TOT\"",
+  "printf '                                              \\e[40m   \\e[41m   \\e[42m   \\e[43m   \\e[44m   \\e[45m   \\e[46m   \\e[47m   %s\\n\\n' \"$R\"",
+];
+const FASTFETCH_CMD = "printf '%s\\n' " +
+  FASTFETCH_LINES.map((l) => "'" + l.replace(/'/g, "'\\''") + "'").join(" ") +
+  " > /usr/local/bin/fastfetch && chmod +x /usr/local/bin/fastfetch";
 
 const SETUP_HVC0 = [
   "modprobe virtio_console",
   BASH_PROFILE_CMD,
   BASHRC_CMD,
+  FASTFETCH_CMD,
   "printf '%s\\n' '# Ensure alternate-screen capable TERM' 'if [ -z \"$TERM\" ] || [ \"$TERM\" = \"vt102\" ] || [ \"$TERM\" = \"vt100\" ] || [ \"$TERM\" = \"dumb\" ]; then export TERM=xterm-256color; fi' > /etc/profile.d/term.sh",
   "chmod 644 /etc/profile.d/term.sh",
   "sed -i 's/vt102/xterm-256color/g' /etc/inittab",
   "grep -q '^H0:' /etc/inittab || echo 'H0:23:respawn:/sbin/getty -L hvc0 115200 xterm-256color --autologin root' >> /etc/inittab",
   "telinit q",
+  // Respawn hvc0 login shell so it sources the freshly written /root/.bashrc (PROMPT_COMMAND + LS_COLORS).
+  "HVC_OLD=$(ps -t hvc0 -o pid=,comm= | awk '$2==\"bash\"{print $1}'); [ -n \"$HVC_OLD\" ] && kill -9 $HVC_OLD 2>/dev/null || true",
 ].join("; ");
 
 const MOTD_LINES = [
@@ -136,7 +178,8 @@ function maybeEnterPhase2() {
       "mountpoint -q /mnt/host || echo 'MOUNT_FAILED'",
       "HVC_PID=$(ps -t hvc0 -o pid=,comm= | awk '$2==\"bash\"{print $1; exit}')",
       "[ -n \"$HVC_PID\" ] && tr '\\0' '\\n' < /proc/$HVC_PID/environ | grep -qx 'TERM=xterm-256color' || echo 'HVC_TERM_FAILED'",
-      "grep -q 'LS_COLORS=' /root/.bashrc && grep -q 'ls --color=auto' /root/.bashrc || echo 'HVC_COLORS_FAILED'",
+      "grep -q 'LS_COLORS=' /root/.bashrc && grep -q 'ls --color=auto' /root/.bashrc && grep -q '__gl_prompt_sp' /root/.bashrc || echo 'HVC_COLORS_FAILED'",
+      "grep -q 'read -r UP_RAW' /usr/local/bin/fastfetch || echo 'FASTFETCH_FAILED'",
       "echo PREP_VERIFIED",
     ].join("; ");
     emulator.serial0_send(`${PREP}; ${verify}\n`);
@@ -156,12 +199,10 @@ emulator.add_listener("serial0-output-byte", (byte) => {
 
   if (phase === 0 && /root@golinux:~#/.test(stripAnsi(serial.text))) {
     phase = 1;
+    hvc.text = "";
     const bootSecs = (Date.now() - started) / 1000;
     console.error(`\n\n[snapshot] ttyS0 prompt after ${bootSecs.toFixed(1)}s at ${MEM_MB} MB; setting up 9p + hvc0`);
     emulator.serial0_send(`dmesg -n 1; ${SETUP_9P}; ${MOTD}; ${SETUP_HVC0}\n`);
-    // If hvc0 already reached its login prompt at boot (baked into /etc/inittab),
-    // wait briefly for SETUP_9P/MOTD/SETUP_HVC0 to finish, then enter phase 2.
-    setTimeout(maybeEnterPhase2, 4000);
     return;
   }
 
@@ -179,7 +220,11 @@ emulator.add_listener("serial0-output-byte", (byte) => {
     emulator.stop(); process.exit(1);
   }
   if (phase === 2 && appeared("HVC_COLORS_FAILED")) {
-    console.error("[snapshot] ERROR: hvc0 bash does not have LS_COLORS");
+    console.error("[snapshot] ERROR: hvc0 bash does not have LS_COLORS / __gl_prompt_sp");
+    emulator.stop(); process.exit(1);
+  }
+  if (phase === 2 && appeared("FASTFETCH_FAILED")) {
+    console.error("[snapshot] ERROR: zero-fork fastfetch was not written");
     emulator.stop(); process.exit(1);
   }
 

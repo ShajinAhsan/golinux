@@ -16,6 +16,7 @@ import {
 } from "./status.js";
 import { currentTerminal, fitSoon } from "./terminal.js";
 import { attachKeyboardInterceptor } from "./keybar.js";
+import { initChunkFallback } from "./chunk-fallback.js";
 
 const FRESH_MOTD = [
   "",
@@ -82,10 +83,13 @@ export async function prepareChunkAccess() {
   const controlled = await waitForWorkerControl(6000);
   if (controlled) {
     pushAssetBase();
+    await initChunkFallback();
     return true;
   }
 
   if (remoteChunks) {
+    // Even if SW control timed out, try page-level direct bundle fallback!
+    await initChunkFallback();
     showFatal(
       "Could not start",
       "The service worker did not take control of the page, and this build " +
@@ -93,6 +97,7 @@ export async function prepareChunkAccess() {
     );
     return false;
   }
+  await initChunkFallback();
   return true;
 }
 
