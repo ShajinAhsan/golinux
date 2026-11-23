@@ -37,8 +37,8 @@ const MEMORY_SIZE = 128 * 1024 * 1024;   // must match the snapshot
 
 // First-use commands per tool: what a user actually runs the first time.
 const TOOLS = {
-  "ls": ["ls -la /bin /usr/bin /etc >/dev/null"],
-  "nano": ["nano --version >/dev/null"],
+  "ls": ["ls -la /bin /usr/bin /etc >/dev/null", "lsblk >/dev/null"],
+  "nano": ["nano --version >/dev/null", "cat /etc/nanorc /usr/share/nano/*.nanorc >/dev/null 2>&1 || true"],
   "vi": ["vi --help >/dev/null 2>&1 || true"],
   "tree": ["tree -L 1 / >/dev/null"],
   "htop": ["htop --version >/dev/null"],
@@ -67,7 +67,7 @@ const TOOLS = {
     "/tmp/gc2 >/dev/null",
   ],
   "python3": ["python3 -c 'import json, math, os; print(json.dumps([math.pi]))' >/dev/null"],
-  "man": ["man ls >/dev/null 2>&1 || true", "man nano >/dev/null 2>&1 || true"],
+  "man": ["less --version >/dev/null", "man find >/dev/null 2>&1 || true", "man du >/dev/null 2>&1 || true", "man df >/dev/null 2>&1 || true", "man git >/dev/null 2>&1 || true"],
   "curl": ["curl --version >/dev/null"],
 };
 

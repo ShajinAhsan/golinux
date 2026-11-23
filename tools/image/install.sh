@@ -21,9 +21,13 @@ apk add --no-cache \
   linux-virt \
   e2fsprogs \
   bash \
+  bash-doc \
+  less \
+  lsblk \
   ncurses-terminfo-base \
   musl-dev \
   nano \
+  nano-syntax \
   git \
   make \
   htop \
@@ -36,6 +40,7 @@ apk add --no-cache \
   curl \
   ca-certificates \
   mandoc \
+  man-pages-posix \
   busybox-doc \
   nano-doc \
   git-doc \
@@ -43,6 +48,22 @@ apk add --no-cache \
   figlet \
   sl \
   python3
+
+# Clear BOTH viewport and scrollback buffer (\e[3J), matching modern GNU clear
+cat > /usr/local/bin/clear <<'CLREOF'
+#!/bin/sh
+printf '\033[H\033[2J\033[3J'
+CLREOF
+chmod +x /usr/local/bin/clear
+
+# Enable vibrant syntax highlighting in nano for popular languages
+# (all packed into a single hot b-core bundle for instant mobile startup)
+: > /etc/nanorc
+for syn in c python sh json markdown makefile javascript html css patch asm awk go rust yaml xml default; do
+  if [ -f "/usr/share/nano/${syn}.nanorc" ]; then
+    echo "include \"/usr/share/nano/${syn}.nanorc\"" >> /etc/nanorc
+  fi
+done
 
 # Install TinyCC (tcc) built in stage 1
 mkdir -p /usr/local/bin /usr/local/lib/tcc
@@ -192,12 +213,16 @@ export HOME=/root
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LANG=C.UTF-8
 export TERM=${TERM:-xterm-256color}
+export PAGER=less
+export LESS='-R'
 [ -f /root/.bashrc ] && . /root/.bashrc
 cd /root 2>/dev/null || cd /
 EOF
 
 cat > /root/.bashrc <<'EOF'
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PAGER=less
+export LESS='-R'
 export CLICOLOR=1
 export LS_COLORS='di=1;34:ln=1;36:ex=1;32:so=1;35:pi=33:bd=1;33:cd=1;33:*.tar=1;31:*.tgz=1;31:*.gz=1;31:*.zip=1;31:*.zst=1;31:*.c=38;5;114:*.h=38;5;110:*.py=38;5;221:*.sh=1;32:*.md=38;5;183:*.json=38;5;215'
 shopt -s checkwinsize

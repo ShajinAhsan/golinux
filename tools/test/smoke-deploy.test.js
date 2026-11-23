@@ -468,11 +468,37 @@ async function launchChrome(profileDir, port) {
       expression: `window.emulator.virtio_console_adapter.term.buffer.active.baseY`, returnByValue: true,
     })).result.value;
     await focusTerm(cdp);
-    await typeText(cdp, "nano /root/n.txt");
+    await typeText(cdp, "nano /root/t.c");
     await pressEnter(cdp);
-    await waitScreen(cdp, /GNU nano/, 30000, "nano opens");
+    await waitScreen(cdp, /GNU nano[\s\S]*#include/, 30000, "nano opens /root/t.c");
+    await sleep(250);
+    const nanoSyntax = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const b = window.emulator.virtio_console_adapter.term.buffer.active;
+        let incColored = false, intColored = false;
+        for (let y = 0; y < b.length; y++) {
+          const l = b.getLine(y);
+          if (!l) continue;
+          const s = l.translateToString(true);
+          const incIdx = s.indexOf("#include");
+          if (incIdx >= 0) {
+            const c = l.getCell(incIdx);
+            if (c && c.getFgColorMode() !== 0) incColored = true;
+          }
+          const intIdx = s.indexOf("int main");
+          if (intIdx >= 0) {
+            const c = l.getCell(intIdx);
+            if (c && c.getFgColorMode() !== 0) intColored = true;
+          }
+        }
+        return JSON.stringify({ incColored, intColored });
+      })()`,
+      returnByValue: true,
+    })).result.value);
+    check(nanoSyntax.incColored && nanoSyntax.intColored,
+      `nano C syntax highlighting is colorful (#include=${nanoSyntax.incColored}, int=${nanoSyntax.intColored})`);
     await pressCtrl(cdp, "x");
-    await waitScreen(cdp, /nano \/root\/n\.txt[\s\S]*root@golinux:~#/, 15000, "nano exits");
+    await waitScreen(cdp, /nano \/root\/t\.c[\s\S]*root@golinux:~#/, 15000, "nano exits");
     await setUserTyping(cdp, false);
     const nanoCheck = JSON.parse((await cdp.send("Runtime.evaluate", {
       expression: `(() => {
@@ -488,6 +514,65 @@ async function launchChrome(profileDir, port) {
     })).result.value);
     check(nanoCheck.nanoLines === 0, `nano leaves zero residue in buffer (found ${nanoCheck.nanoLines})`);
     check(nanoCheck.baseY === baseBeforeNano, `nano adds zero scrollback lines (${baseBeforeNano} -> ${nanoCheck.baseY})`);
+
+    // Verify man pages (find/du/df), lsblk, man git alternate-screen cleanup, and clear scrollback wipe
+    console.log("\n== man pages, lsblk, less alternate screen, clear scrollback ==");
+    await setUserTyping(cdp, true);
+    const manLsblkOut = await runCmd(
+      cdp,
+      "man -w find >/dev/null && man -w du >/dev/null && man -w df >/dev/null && lsblk | grep -q sda && echo MAN_LSBLK_OK",
+      /MAN_LSBLK_OK[\s\S]*MAN_LSBLK_OK/,
+      30000,
+      "man find/du/df + lsblk"
+    );
+    check(/MAN_LSBLK_OK/.test(manLsblkOut), "man find, man du, man df manuals exist and lsblk reports sda");
+
+    const baseBeforeMan = (await cdp.send("Runtime.evaluate", {
+      expression: `window.emulator.virtio_console_adapter.term.buffer.active.baseY`, returnByValue: true,
+    })).result.value;
+    await focusTerm(cdp);
+    await typeText(cdp, "man git");
+    await pressEnter(cdp);
+    await waitScreen(cdp, /GIT\(1\)/, 30000, "man git opens in less");
+    await sleep(150);
+    await typeText(cdp, "q");
+    await waitScreen(cdp, /man git[\s\S]*root@golinux:~#/, 15000, "man git exits");
+    await setUserTyping(cdp, false);
+    const manCheck = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const b = window.emulator.virtio_console_adapter.term.buffer.active;
+        let gitHeaderLines = 0;
+        for (let y = 0; y < b.length; y++) {
+          const l = b.getLine(y);
+          if (l && /GIT\(1\)/.test(l.translateToString(true))) gitHeaderLines++;
+        }
+        return JSON.stringify({ gitHeaderLines, baseY: b.baseY });
+      })()`,
+      returnByValue: true,
+    })).result.value);
+    check(manCheck.gitHeaderLines === 0,
+      `man git (via less) leaves zero GIT(1) residue in scrollback (found ${manCheck.gitHeaderLines})`);
+    check(manCheck.baseY === baseBeforeMan,
+      `man git adds zero scrollback lines (${baseBeforeMan} -> ${manCheck.baseY})`);
+
+    // Verify `clear` wipes BOTH viewport AND scrollback buffer (\e[3J)
+    await setUserTyping(cdp, true);
+    await runCmd(cdp, "clear && echo CLEARED_SCROLLBACK_OK", /^CLEARED_SCROLLBACK_OK$/m, 15000, "clear wipes scrollback");
+    await setUserTyping(cdp, false);
+    const clearCheck = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const b = window.emulator.virtio_console_adapter.term.buffer.active;
+        let staleFound = false;
+        for (let y = 0; y < b.length; y++) {
+          const l = b.getLine(y);
+          if (l && /GCC_OUTPUT_INTACT|GIT\(1\)/.test(l.translateToString(true))) staleFound = true;
+        }
+        return JSON.stringify({ baseY: b.baseY, staleFound });
+      })()`,
+      returnByValue: true,
+    })).result.value);
+    check(clearCheck.baseY === 0 && !clearCheck.staleFound,
+      `clear wipes scrollback completely (baseY=${clearCheck.baseY}, staleFound=${clearCheck.staleFound})`);
 
     // Verify newly added CLI tools (fastfetch, cowsay, python3, jq, tree)
     console.log("\n== new CLI tools (fastfetch, cowsay, python3, jq, tree) ==");
@@ -544,6 +629,37 @@ async function launchChrome(profileDir, port) {
     const szMatch = szOut.match(/SZ=(\d+) (\d+) END_SZ/);
     check(!!szMatch && Number(szMatch[1]) === gridNow.rows && Number(szMatch[2]) === gridNow.cols,
       `guest tty matches xterm grid via virtio-console0-resize (${szMatch ? szMatch[1] + "x" + szMatch[2] : "?"} vs ${gridNow.rows}x${gridNow.cols})`);
+
+    // Mobile keyboard toggle flicker regression: 5 rapid height-only viewport frames must coalesce into <= 1 SIGWINCH
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await sleep(400);
+    await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const bus = window.emulator.bus;
+        window.__origBusSend = bus.send.bind(bus);
+        window.__virtioResizeCount = 0;
+        bus.send = function(name, value) {
+          if (name === "virtio-console0-resize") window.__virtioResizeCount++;
+          return window.__origBusSend(name, value);
+        };
+      })()`,
+    });
+    for (const h of [760, 680, 600, 540, 480]) {
+      await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: h, deviceScaleFactor: 1, mobile: true });
+      await sleep(30);
+    }
+    await sleep(400);
+    const kbdResizeCount = (await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const n = window.__virtioResizeCount;
+        window.emulator.bus.send = window.__origBusSend;
+        delete window.__origBusSend;
+        return n;
+      })()`,
+      returnByValue: true,
+    })).result.value;
+    check(kbdResizeCount === 1,
+      `mobile keyboard 5-frame height animation coalesced into 1 virtio resize (got ${kbdResizeCount})`);
 
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await sleep(400);

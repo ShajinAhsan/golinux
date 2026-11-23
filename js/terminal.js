@@ -122,19 +122,44 @@ function syncTerminalStyle(term) {
 }
 
 let resizeRetryTimer = null;
+let resizeDebounceTimer = null;
+let lastSentCols = 0;
+let lastSentRows = 0;
+const VIRTIO_RESIZE_DEBOUNCE_MS = 220;
 
-function sendVirtioResize(emu, cols, rows) {
+function sendVirtioResizeNow(emu, cols, rows) {
   if (!emu || !emu.virtio_console_adapter || !emu.bus) return;
   const dev = emu.v86 && emu.v86.cpu && emu.v86.cpu.devices && emu.v86.cpu.devices.virtio_console;
   const q2 = dev && dev.virtio && dev.virtio.queues && dev.virtio.queues[2];
   if (q2 && (!q2.is_configured() || !q2.has_request())) {
     clearTimeout(resizeRetryTimer);
-    resizeRetryTimer = setTimeout(() => sendVirtioResize(emu, appliedCols, appliedRows), 60);
+    resizeRetryTimer = setTimeout(() => sendVirtioResizeNow(getEmulator(), appliedCols, appliedRows), 60);
     return;
   }
   try {
+    lastSentCols = cols;
+    lastSentRows = rows;
     emu.bus.send("virtio-console0-resize", [cols, rows]);
   } catch (e) { /* guest not ready yet */ }
+}
+
+/**
+ * Debounce out-of-band SIGWINCH so mobile keyboard open/close animations
+ * (which fire 10+ visualViewport frames) send ONE clean resize after settling
+ * instead of flickering the bash prompt on every animation frame.
+ */
+function scheduleVirtioResize(emu, cols, rows, immediate) {
+  clearTimeout(resizeDebounceTimer);
+  resizeDebounceTimer = null;
+  if (immediate) {
+    sendVirtioResizeNow(emu, cols, rows);
+    return;
+  }
+  resizeDebounceTimer = setTimeout(() => {
+    resizeDebounceTimer = null;
+    if (appliedCols === lastSentCols && appliedRows === lastSentRows) return;
+    sendVirtioResizeNow(getEmulator(), appliedCols, appliedRows);
+  }, VIRTIO_RESIZE_DEBOUNCE_MS);
 }
 
 /** Resize xterm.js and notify guest via out-of-band virtio-console0-resize. */
@@ -154,7 +179,7 @@ export function applyGrid(cols, rows, force) {
   }
 
   // Out-of-band virtio-console resize (SIGWINCH to /dev/hvc0, zero stdin bytes).
-  sendVirtioResize(getEmulator(), cols, rows);
+  scheduleVirtioResize(getEmulator(), cols, rows, !!force);
 }
 
 export function fitTerminal(force) {
@@ -176,8 +201,12 @@ export function scheduleFit() {
 }
 
 export function fitSoon({ nudgeRedraw = false } = {}) {
+  clearTimeout(resizeDebounceTimer);
+  resizeDebounceTimer = null;
   appliedCols = 0;
   appliedRows = 0;
+  lastSentCols = 0;
+  lastSentRows = 0;
   requestAnimationFrame(() => {
     fitTerminal(true);
     if (nudgeRedraw) {
@@ -189,8 +218,8 @@ export function fitSoon({ nudgeRedraw = false } = {}) {
       const c = appliedCols;
       const r = appliedRows;
       if (emu && emu.virtio_console_adapter && c > 0 && r > MIN_ROWS) {
-        setTimeout(() => sendVirtioResize(emu, c, r - 1), 80);
-        setTimeout(() => sendVirtioResize(emu, appliedCols || c, appliedRows || r), 160);
+        setTimeout(() => sendVirtioResizeNow(emu, c, r - 1), 80);
+        setTimeout(() => sendVirtioResizeNow(emu, appliedCols || c, appliedRows || r), 160);
       }
     }
     requestAnimationFrame(() => fitTerminal(false));
@@ -199,19 +228,22 @@ export function fitSoon({ nudgeRedraw = false } = {}) {
   setTimeout(() => fitTerminal(false), 900);
 }
 
+let lastVpH = -1;
+let lastVpTop = -1;
+
 /** Keep #app pinned to visualViewport so iOS Safari soft keyboard never covers #keybar. */
 export function syncVisualViewport() {
   const app = document.getElementById("app");
   if (!app) return;
   const vv = window.visualViewport;
-  if (vv && vv.height > 0) {
-    document.documentElement.style.setProperty("--app-h", Math.round(vv.height) + "px");
-    app.style.transform = vv.offsetTop ? `translateY(${Math.round(vv.offsetTop)}px)` : "";
-    if (window.scrollY !== 0) window.scrollTo(0, 0);
-  } else {
-    document.documentElement.style.setProperty("--app-h", window.innerHeight + "px");
-    app.style.transform = "";
-  }
+  const h = vv && vv.height > 0 ? Math.round(vv.height) : window.innerHeight;
+  const top = vv && vv.offsetTop ? Math.round(vv.offsetTop) : 0;
+  if (h === lastVpH && top === lastVpTop) return;
+  lastVpH = h;
+  lastVpTop = top;
+  document.documentElement.style.setProperty("--app-h", h + "px");
+  app.style.transform = top ? `translateY(${top}px)` : "";
+  if (vv && window.scrollY !== 0) window.scrollTo(0, 0);
   scheduleFit();
 }
 

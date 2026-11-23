@@ -51,7 +51,7 @@ const PREP = [
   "sync",
   "echo 3 > /proc/sys/vm/drop_caches",
   // Pre-warm instant core binaries in page cache
-  "cat /bin/busybox /usr/local/bin/tcc /usr/local/bin/cowsay /usr/bin/sl >/dev/null 2>&1 || true",
+  "cat /bin/busybox /usr/local/bin/tcc /usr/local/bin/cowsay /usr/local/bin/clear /usr/bin/sl /bin/lsblk >/dev/null 2>&1 || true",
 ].join("; ");
 
 const serial = { text: "" };
