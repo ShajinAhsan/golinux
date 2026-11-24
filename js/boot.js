@@ -292,32 +292,30 @@ async function fetchSnapshotWithProgress(url, onProgress) {
   const reader = res.body.getReader();
   const parts = [];
   let loaded = 0;
-  let lastT = performance.now();
-  let lastLoaded = 0;
-  let ewmaBps = 0;
+  const samples = [{ t: fetchStart, bytes: 0 }];
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     parts.push(value);
     loaded += value.byteLength;
     const now = performance.now();
-    const dt = (now - lastT) / 1000;
-    if (dt >= 0.25) {
-      const inst = (loaded - lastLoaded) / dt;
-      ewmaBps = ewmaBps ? (0.35 * inst + 0.65 * ewmaBps) : inst;
-      lastT = now;
-      lastLoaded = loaded;
-    }
-    const elapsedSec = Math.max(0.05, (now - fetchStart) / 1000);
-    const displayBps = ewmaBps || (loaded / elapsedSec);
+    samples.push({ t: now, bytes: loaded });
+    const cutoff = now - 2000;
+    while (samples.length > 2 && samples[0].t < cutoff) samples.shift();
+    const first = samples[0];
+    const dt = (now - first.t) / 1000;
+    const displayBps = (dt >= 0.4 && loaded - first.bytes > 0)
+      ? ((loaded - first.bytes) / dt)
+      : 0;
     onProgress(loaded, total || loaded, displayBps);
   }
 
   const out = new Uint8Array(loaded);
   let off = 0;
   for (const p of parts) { out.set(p, off); off += p.byteLength; }
-  const totalSec = Math.max(0.05, (performance.now() - fetchStart) / 1000);
-  const finalBps = ewmaBps || (loaded / totalSec);
+  const totalMs = performance.now() - fetchStart;
+  // Only report real network transfers (>= 300 ms); skip instant local cache reads.
+  const finalBps = totalMs >= 300 ? (loaded / (totalMs / 1000)) : 0;
   return { buffer: out.buffer, bps: finalBps };
 }
 

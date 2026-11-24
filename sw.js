@@ -514,13 +514,39 @@ function broadcast(msg) {
 const diskActivity = {
   pending: 0, files: 0, bytes: 0, inflightBytes: 0, lastPost: 0,
   timer: null, settleTimer: null, recent: [], activeNames: new Set(),
+  streamTotal: 0, streamWindow: [],
 };
 const BURST_SETTLE_MS = 250;
 const PROGRESS_POST_MS = 200;
+const STREAM_WINDOW_MS = 2500;
+
+function computeLiveStreamBps(now) {
+  const win = diskActivity.streamWindow;
+  if (win.length < 2) return null;
+  const cutoff = now - STREAM_WINDOW_MS;
+  while (win.length > 2 && win[0].t < cutoff) win.shift();
+  const first = win[0];
+  const last = win[win.length - 1];
+  const dt = (last.t - first.t) / 1000;
+  const db = last.total - first.total;
+  if (dt < 0.45 || db < 4096) return null;
+  return db / dt;
+}
 
 function postDiskActivity() {
-  diskActivity.lastPost = Date.now();
+  const now = Date.now();
+  diskActivity.lastPost = now;
   diskActivity.timer = null;
+  const liveBps = computeLiveStreamBps(now);
+  if (liveBps != null) {
+    // If active download is streaming slower than our historical estimate,
+    // immediately pull ewmaBps down mid-flight so slow-link Range mode engages right away.
+    if (throughput.ewmaBps == null || liveBps < throughput.ewmaBps * 0.75) {
+      throughput.ewmaBps = throughput.ewmaBps == null
+        ? liveBps
+        : (0.75 * liveBps + 0.25 * throughput.ewmaBps);
+    }
+  }
   const msg = {
     type: "disk-activity",
     pending: diskActivity.pending,
@@ -529,6 +555,7 @@ function postDiskActivity() {
     inflightBytes: diskActivity.inflightBytes,
     names: diskActivity.recent,
     activeNames: Array.from(diskActivity.activeNames),
+    liveBps,
     bps: effectiveBps(),
     mode: currentBandwidthMode(),
   };
@@ -549,6 +576,7 @@ function scheduleDiskPost(force) {
       diskActivity.lastPost = Date.now();
       diskActivity.inflightBytes = 0;
       diskActivity.activeNames.clear();
+      diskActivity.streamWindow = [];
       broadcast({
         type: "disk-activity",
         pending: 0,
@@ -557,6 +585,7 @@ function scheduleDiskPost(force) {
         inflightBytes: 0,
         names: [],
         activeNames: [],
+        liveBps: null,
         bps: effectiveBps(),
         mode: currentBandwidthMode(),
         idle: true,
@@ -575,6 +604,9 @@ function scheduleDiskPost(force) {
 function beginDiskRead(name) {
   // Foreground disk reads immediately preempt any background idle warming.
   abortIdleWarm();
+  if (diskActivity.pending === 0) {
+    diskActivity.streamWindow = [{ t: Date.now(), total: diskActivity.streamTotal }];
+  }
   diskActivity.pending++;
   if (name) diskActivity.activeNames.add(name);
   scheduleDiskPost(diskActivity.pending === 1);
@@ -583,6 +615,12 @@ function beginDiskRead(name) {
 function progressDiskRead(deltaBytes) {
   if (!(deltaBytes > 0)) return;
   diskActivity.inflightBytes += deltaBytes;
+  diskActivity.streamTotal += deltaBytes;
+  const now = Date.now();
+  diskActivity.streamWindow.push({ t: now, total: diskActivity.streamTotal });
+  if (diskActivity.streamWindow.length > 64) {
+    diskActivity.streamWindow.splice(0, diskActivity.streamWindow.length - 64);
+  }
   scheduleDiskPost(false);
 }
 
@@ -618,15 +656,25 @@ function noteThroughput(bytes, ms) {
   throughput.samples++;
   throughput.bytes += bytes;
   throughput.ms += ms;
-  throughput.ewmaBps = throughput.ewmaBps == null
-    ? instantBps
-    : (0.35 * instantBps + 0.65 * throughput.ewmaBps);
+  // Ignore ultra-fast local HTTP disk cache hits (< 35 ms at > 10 MB/s) so they
+  // never poison the WAN throughput estimate with fake 25-50 MB/s readings.
+  if (ms < 35 && instantBps > 10 * 1024 * 1024) return;
+  if (throughput.ewmaBps == null) {
+    throughput.ewmaBps = instantBps;
+  } else if (instantBps < throughput.ewmaBps) {
+    // Drop quickly when connection slows down (asymmetric EWMA).
+    throughput.ewmaBps = 0.75 * instantBps + 0.25 * throughput.ewmaBps;
+  } else {
+    throughput.ewmaBps = 0.35 * instantBps + 0.65 * throughput.ewmaBps;
+  }
 }
 
 function seedThroughput(bps) {
   if (!(bps > 0) || !Number.isFinite(bps)) return;
   throughput.seededBps = bps;
-  if (throughput.ewmaBps == null) throughput.ewmaBps = bps;
+  if (throughput.ewmaBps == null || bps < throughput.ewmaBps) {
+    throughput.ewmaBps = bps;
+  }
 }
 
 function measuredThroughput() {

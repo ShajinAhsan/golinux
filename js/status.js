@@ -160,16 +160,35 @@ export function setupStatusChrome() {
 const DISK_SHOW_FAST_MS = 450;
 const DISK_SHOW_SLOW_MS = 250;
 const DISK_HIDE_MS = 320;
+const BURST_SPEED_WINDOW_MS = 2500;
 let diskShowTimer = null;
 let diskHideTimer = null;
 let diskVisible = false;
 let burstStart = 0;
 let burstBaseBytes = 0;
+let burstSamples = [];
 let lastDiskFiles = 0;
 let lastObservedBps = null;
 let lastObservedMode = "fast";
-let diskStats = { files: 0, bytes: 0, inflightBytes: 0, burstBytes: 0, bps: null, mode: "fast" };
+let diskStats = { files: 0, bytes: 0, inflightBytes: 0, burstBytes: 0, liveBps: null, bps: null, mode: "fast" };
 let customLabelFn = null;
+
+function computeBurstBps(now) {
+  const cutoff = now - BURST_SPEED_WINDOW_MS;
+  while (burstSamples.length > 2 && burstSamples[0].t < cutoff) burstSamples.shift();
+  if (burstSamples.length >= 2) {
+    const first = burstSamples[0];
+    const last = burstSamples[burstSamples.length - 1];
+    const dt = (last.t - first.t) / 1000;
+    const db = last.bytes - first.bytes;
+    if (dt >= 0.45 && db >= 4096) return db / dt;
+  }
+  if (burstStart && diskStats.burstBytes >= 4096) {
+    const dt = (now - burstStart) / 1000;
+    if (dt >= 0.6) return diskStats.burstBytes / dt;
+  }
+  return null;
+}
 
 export function setDiskLabelProvider(fn) {
   customLabelFn = fn;
@@ -191,8 +210,14 @@ function renderDiskToast() {
   const metaEl = $("diskMeta");
   if (!labelEl || !subEl) return;
 
-  const elapsedMs = burstStart ? (Date.now() - burstStart) : 0;
-  const liveBps = diskStats.bps || lastObservedBps;
+  const now = Date.now();
+  const elapsedMs = burstStart ? (now - burstStart) : 0;
+  // Use ONLY live speed measured during THIS active burst — never a stale
+  // historical / HTTP-cache reading from earlier in the session.
+  const liveBps = diskStats.liveBps || computeBurstBps(now);
+  if (liveBps > 0 && elapsedMs >= 600) {
+    lastObservedBps = liveBps;
+  }
   const custom = customLabelFn && customLabelFn({
     burstBytes: diskStats.burstBytes,
     inflightBytes: diskStats.inflightBytes,
@@ -282,7 +307,8 @@ export function handleDiskActivity(msg, { enabled = true, onNames, onBurstEnd } 
 
   if (busy && !burstStart) {
     burstStart = now;
-    burstBaseBytes = Math.max(0, (msg.bytes || 0) - (newFiles > 0 ? 0 : 0));
+    burstBaseBytes = Math.max(0, msg.bytes || 0);
+    burstSamples = [{ t: now, bytes: 0 }];
   }
 
   if (busy) {
@@ -290,11 +316,16 @@ export function handleDiskActivity(msg, { enabled = true, onNames, onBurstEnd } 
     diskHideTimer = null;
     const completedDelta = Math.max(0, (msg.bytes || 0) - burstBaseBytes);
     const burstBytes = completedDelta + (msg.inflightBytes || 0);
+    if (!burstSamples.length || burstBytes > burstSamples[burstSamples.length - 1].bytes) {
+      burstSamples.push({ t: now, bytes: burstBytes });
+      if (burstSamples.length > 64) burstSamples.splice(0, burstSamples.length - 64);
+    }
     diskStats = {
       files: msg.files || 0,
       bytes: msg.bytes || 0,
       inflightBytes: msg.inflightBytes || 0,
       burstBytes,
+      liveBps: (msg.liveBps > 0 && Number.isFinite(msg.liveBps)) ? msg.liveBps : null,
       bps: msg.bps || lastObservedBps,
       mode: msg.mode || lastObservedMode,
     };
@@ -325,6 +356,7 @@ export function handleDiskActivity(msg, { enabled = true, onNames, onBurstEnd } 
     const lasted = burstStart ? now - burstStart : 0;
     burstStart = 0;
     burstBaseBytes = msg.bytes || 0;
+    burstSamples = [];
     if (diskVisible && !diskHideTimer) {
       diskHideTimer = setTimeout(() => hideDiskToast(onBurstEnd), DISK_HIDE_MS);
     } else if (!diskVisible && lasted < showDelay && onBurstEnd) {

@@ -584,6 +584,29 @@ async function testAdaptiveRangeStreamingAndPreemption() {
   const bufFb = Buffer.from(await rFallback.arrayBuffer());
   check(rFallback.status === 200 && bufFb.length === chunk1.length && bufFb[0] === 0x42,
     "(slow-range) gracefully unpacks 200 OK if upstream ignores Range header");
+
+  // Fake ultra-fast HTTP disk-cache hit (< 35ms, > 10 MB/s) must NOT poison throughput!
+  const hugeCachePayload = Buffer.alloc(750 * 1024, 0x55);
+  const dCacheHit = loadWorker({
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("chunks-precache.json")) return new Response(JSON.stringify(REAL_LIST), { status: 200 });
+      if (url.endsWith("bundles.json")) {
+        return new Response(JSON.stringify({
+          v: 1, buildId: "test", chunkSize: 131072,
+          files: ["b-cache-000.pack"],
+          entries: [[0, 0, 0, hugeCachePayload.length]],
+        }), { status: 200 });
+      }
+      // Instant 2ms local HTTP disk-cache hit (~375 MB/s!)
+      return new Response(hugeCachePayload, { status: 200, headers: { "Content-Length": String(hugeCachePayload.length) } });
+    },
+  });
+  await seedEmptyTemplate(dCacheHit);
+  await (await dCacheHit.dispatchFetch(chunkRequest(REAL_LIST[0]))).arrayBuffer();
+  const stAfterCacheHit = await dCacheHit.askThroughput();
+  check(stAfterCacheHit.effectiveBps === null,
+    `(speed) instant local HTTP cache hit does NOT poison effectiveBps (got ${stAfterCacheHit.effectiveBps})`);
 }
 
 function testPageMessageContract() {
