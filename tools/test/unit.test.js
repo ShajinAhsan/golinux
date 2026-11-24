@@ -490,12 +490,54 @@ async function testPureESModules() {
   check(listed.length === 2 && listed[0].path === "sub/a.bin" && listed[0].size === 4096 && listed[1].path === "z.txt" && listed[1].size === 12,
     "transfer: listHostFiles walks /mnt/host recursively, skips ./.., returns sorted files with sizes");
 
-  const fakeBoundFs = makeMockFs9p({ "secret.c": "in root" });
+  const fakeBoundFs = makeMockFs9p({ ".bashrc": "default", "secret.c": "in root" });
   const hFile = fakeBoundFs.fs9p.CreateFile("out.txt", fakeBoundFs.hostId);
   fakeBoundFs.fs9p.inodes[hFile].size = 7;
   const listedBound = transfer.listHostFiles(fakeBoundFs.fs9p);
   check(listedBound.length === 1 && listedBound[0].path === "out.txt",
     "transfer: listHostFiles scopes to /host subtree and never exposes /root files");
+
+  // Direct ~ upload routing, >10 MB staging, overwrite RAM-leak guard, directory guard & unified download listing
+  const tNormal = transfer.resolveUploadTarget(fakeBoundFs.fs9p, 2048);
+  check(tNormal.prefix === "/root/" && tNormal.persistent === true,
+    "transfer: normal upload (<= 10 MB) targets ~ (/root) persistently");
+  const tLarge = transfer.resolveUploadTarget(fakeBoundFs.fs9p, transfer.LARGE_HOME_UPLOAD_BYTES + 1);
+  check(tLarge.prefix === "/host/" && tLarge.persistent === false && tLarge.reason === "large",
+    "transfer: large upload (> 10 MB) stages to temporary /mnt/host to keep /root saves fast");
+
+  const dlItems = transfer.listDownloadableFiles(fakeBoundFs.fs9p);
+  check(dlItems.length === 2 &&
+        dlItems[0].area === "root" && dlItems[0].displayPath === "~/secret.c" &&
+        dlItems[1].area === "host" && dlItems[1].displayPath === "/mnt/host/out.txt",
+    "transfer: listDownloadableFiles lists user ~ files (skipping .bashrc) + /mnt/host files");
+
+  // Overwrite re-upload must unlink old inode & free old inodedata; directory collision must throw
+  const upMock = makeMockFs9p({ "dup.c": "v1" });
+  const subDirId = upMock.fs9p.CreateDirectory("projects", upMock.rootId);
+  const oldDupId = upMock.fs9p.Search(upMock.rootId, "dup.c");
+  const fakeUploadEmu = {
+    fs9p: upMock.fs9p,
+    async create_file(p, bytes) {
+      const name = p.split("/").pop();
+      const pid = p.startsWith("/root/") ? upMock.rootId : upMock.hostId;
+      const id = upMock.fs9p.CreateFile(name, pid);
+      upMock.fs9p.inodes[id].size = bytes.byteLength;
+      upMock.fs9p.inodedata[id] = new Uint8Array(bytes);
+    },
+  };
+  await transfer.writeUploadedFile(fakeUploadEmu, "dup.c", new TextEncoder().encode("version2"));
+  const newDupId = upMock.fs9p.Search(upMock.rootId, "dup.c");
+  check(newDupId > 0 && newDupId !== oldDupId && !(oldDupId in upMock.fs9p.inodedata),
+    "transfer: re-uploading existing file unlinks old inode and frees inodedata");
+
+  let dirErr = false;
+  try {
+    await transfer.writeUploadedFile(fakeUploadEmu, "projects", new Uint8Array([1, 2]));
+  } catch (_) {
+    dirErr = true;
+  }
+  check(dirErr && upMock.fs9p.Search(upMock.rootId, "projects") === subDirId,
+    "transfer: uploading over an existing directory is refused cleanly");
 
   const tp = await import(pathToFileURL(path.join(ROOT, "js/tool-progress.js")).href);
   const sets = {

@@ -10,8 +10,17 @@ export function Footer() {
       <div className="mx-auto w-full max-w-[1180px] px-4 sm:px-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <p>
-            GoLinux is MIT licensed. Powered by v86, xterm.js, SeaBIOS and
-            Alpine Linux.
+            Built by{" "}
+            <a
+              href={SITE.authorGithubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold text-ink underline-offset-4 hover:underline"
+            >
+              {SITE.authorName}
+              <span className="sr-only"> (opens in a new tab)</span>
+            </a>{" "}
+            · MIT licensed · Powered by v86, xterm.js, SeaBIOS and Alpine Linux.
           </p>
           <nav
             aria-label="Footer"
@@ -24,12 +33,12 @@ export function Footer() {
               Licenses and about
             </Link>
             <a
-              href={SITE.githubUrl}
+              href={SITE.authorGithubUrl}
               target="_blank"
               rel="noopener noreferrer"
               className={LINK_CLASS}
             >
-              GitHub
+              github.com/shajinahsan
               <span className="sr-only"> (opens in a new tab)</span>
             </a>
           </nav>

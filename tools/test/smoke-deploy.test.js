@@ -743,8 +743,14 @@ async function launchChrome(profileDir, port) {
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await sleep(400);
 
-    /* --- 5. Upload & Option A Download (/mnt/host) with ZERO stdin injection --- */
-    console.log("\n== upload & download (/mnt/host, zero stdin) ==");
+    /* --- 5. Direct ~ (/root) Upload & Unified Download with ZERO stdin injection --- */
+    console.log("\n== upload & download (~ /root direct + /mnt/host, zero stdin) ==");
+    const netHidden = (await cdp.send("Runtime.evaluate", {
+      expression: `document.getElementById("netBtn").hidden === true && document.getElementById("mNet").hidden === true`,
+      returnByValue: true,
+    })).result.value;
+    check(netHidden === true, "Net toggle is dormant/hidden when GL_FEATURES.network is false");
+
     await sleep(150);
     await cdp.send("Runtime.evaluate", {
       expression: `window.__stdinSpy.injectedBytes = []; window.__stdinSpy.serial0SendCalls = 0;`,
@@ -769,16 +775,16 @@ async function launchChrome(profileDir, port) {
     await setUserTyping(cdp, true);
     const upCheck = await runCmd(
       cdp,
-      "test ! -f /root/pwned && cat /mnt/host/safe* && echo FROM_GUEST_9P > /mnt/host/export.txt && echo EXPORT_WRITTEN",
+      "test ! -f /root/pwned && cat /root/safe* && echo FROM_GUEST_HOME > /root/home_export.txt && echo FROM_GUEST_9P > /mnt/host/export.txt && echo EXPORT_WRITTEN",
       /UPLOAD_PAYLOAD_OK[\s\S]*EXPORT_WRITTEN/,
       20000,
-      "verify upload & create guest export"
+      "verify direct ~ upload & create guest exports"
     );
     await sleep(150);
     await setUserTyping(cdp, false);
-    check(/UPLOAD_PAYLOAD_OK/.test(upCheck), "uploaded file readable in guest /mnt/host without shell injection");
+    check(/UPLOAD_PAYLOAD_OK/.test(upCheck), "uploaded file landed directly in ~ (/root) without shell injection");
 
-    // Open Download modal (Option A): must list export.txt and read it via 9p with zero stdin!
+    // Open Download modal (Option B): must list ~/home_export.txt AND /mnt/host/export.txt via 9p with zero stdin!
     await cdp.send("Runtime.evaluate", {
       expression: `window.__stdinSpy.injectedBytes = []; window.__stdinSpy.serial0SendCalls = 0; document.getElementById("downloadBtn").click();`,
     });
@@ -787,7 +793,7 @@ async function launchChrome(profileDir, port) {
       expression: `(async () => {
         const visible = document.getElementById("filesModal").classList.contains("visible");
         const items = [...document.querySelectorAll("#filesList .hf-name")].map(e => e.textContent);
-        const btn = document.querySelector('#filesList button[data-download-path="export.txt"]');
+        const btn = document.querySelector('#filesList button[data-download-path="home_export.txt"]');
         if (btn) btn.click();
         await new Promise(r => setTimeout(r, 300));
         const status = document.getElementById("filesStatus").textContent;
@@ -796,15 +802,17 @@ async function launchChrome(profileDir, port) {
       })()`,
       awaitPromise: true, returnByValue: true,
     })).result.value);
-    check(dlModalState.visible === true && dlModalState.items.includes("export.txt"),
-      "Download modal lists guest file from /mnt/host (" + dlModalState.items.join(", ") + ")");
-    check(/Downloaded export\.txt/.test(dlModalState.status),
-      "Option A Download succeeded via 9p read_file (" + dlModalState.status + ")");
+    check(dlModalState.visible === true &&
+          dlModalState.items.includes("~/home_export.txt") &&
+          dlModalState.items.includes("/mnt/host/export.txt"),
+      "Download modal lists files directly from ~ (/root) and /mnt/host (" + dlModalState.items.join(", ") + ")");
+    check(/Downloaded ~\/home_export\.txt/.test(dlModalState.status),
+      "Direct ~ Download succeeded via 9p read_file (" + dlModalState.status + ")");
     const spyAfterDownload = JSON.parse((await cdp.send("Runtime.evaluate", {
       expression: `JSON.stringify(window.__stdinSpy)`, returnByValue: true,
     })).result.value);
     check(spyAfterDownload.serial0SendCalls === 0 && spyAfterDownload.injectedBytes.length === 0,
-      "INV-1: Option A Download sends zero bytes to guest stdin (BUG-04)");
+      "INV-1: Direct ~ Download sends zero bytes to guest stdin (BUG-04)");
 
     /* --- 6. Instant /root persistence across refresh + fresh shell on stuck ping --- */
     console.log("\n== instant /root persistence, fresh shell after ping & INV-1 spy ==");

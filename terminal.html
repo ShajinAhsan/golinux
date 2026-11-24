@@ -39,11 +39,11 @@
         <span class="net-dot" aria-hidden="true"></span>
         <span class="net-lbl">Net: Off</span>
       </button>
-      <button id="uploadBtn" class="wide-only ghost-btn" data-feature="upload" title="Upload files into /mnt/host (max 50 MB)">
+      <button id="uploadBtn" class="wide-only ghost-btn" data-feature="upload" title="Upload or drag-and-drop files into ~ (/root, auto-saved; files over 10 MB go to /mnt/host, max 50 MB)">
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
         Upload
       </button>
-      <button id="downloadBtn" class="wide-only ghost-btn" data-feature="download" title="Download files from /mnt/host">
+      <button id="downloadBtn" class="wide-only ghost-btn" data-feature="download" title="Download files directly from ~ (/root) or /mnt/host">
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Download
       </button>
@@ -51,7 +51,7 @@
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
         Tools
       </button>
-      <button id="saveBtn" class="wide-only ghost-btn" title="Save /root files to browser storage now">
+      <button id="saveBtn" class="wide-only ghost-btn" title="Auto-saves ~ (/root) ~350 ms after edits and on reload. Click to save immediately; files outside /root aren't saved.">
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
         Save
       </button>
@@ -66,9 +66,9 @@
 
     <div id="barMenu" role="menu" hidden>
       <button id="mNet" role="menuitem" data-feature="network">Internet (Fetch): Off</button>
-      <button id="mSave" role="menuitem">Save /root now</button>
-      <button id="mUpload" role="menuitem" data-feature="upload">Upload to /mnt/host</button>
-      <button id="mDownload" role="menuitem" data-feature="download">Download from /mnt/host</button>
+      <button id="mSave" role="menuitem">Save ~ (/root) now</button>
+      <button id="mUpload" role="menuitem" data-feature="upload">Upload to ~ (/root)</button>
+      <button id="mDownload" role="menuitem" data-feature="download">Download files</button>
       <button id="mPacks" role="menuitem" data-feature="packs">Tools &amp; offline cache</button>
       <button id="mReset" role="menuitem" class="danger-item">Reset machine</button>
       <a id="mAbout" role="menuitem" href="about.html">About &amp; Licenses</a>
@@ -187,12 +187,10 @@
 
   <div id="filesModal" role="dialog" aria-modal="true" aria-labelledby="filesTitle" data-feature="download">
     <div id="filesBox" class="modal-box">
-      <h2 id="filesTitle">Download from /mnt/host</h2>
+      <h2 id="filesTitle">Download files</h2>
       <p class="hint">
-        Copy files into <code>/mnt/host</code> first — e.g.
-        <code>cp main.c /mnt/host/</code> or
-        <code>tar czf /mnt/host/root.tar.gz -C / root</code>.
-        Files here are temporary and not saved across reloads.
+        Files in <code>~</code> (<code>/root</code>) appear here automatically and auto-save across reloads.
+        Files over 10 MB or copied into <code>/mnt/host</code> appear as temporary transfers.
       </p>
       <div id="filesList"></div>
       <div id="filesStatus"></div>

@@ -38,7 +38,7 @@ const STRUCTURED_DATA = {
         "Pre-installed BusyBox, TinyCC, Python 3.12, git, nano, vim, htop, jq, and fastfetch",
         "Private local persistence via browser OPFS",
         "First-class mobile terminal with touch keybar and virtio-console resize",
-        "Drag-and-drop file transfer via /mnt/host",
+        "Drag-and-drop file transfer directly into ~ (/root)",
       ],
     },
   ],
@@ -308,15 +308,16 @@ export default function HomePage() {
                   <span className="rounded-md border border-border bg-canvas px-2 py-1 text-ink">
                     main.c
                   </span>
-                  <span className="ml-auto text-secondary">/mnt/host</span>
+                  <span className="ml-auto text-secondary">~ (/root)</span>
                 </div>
                 <h3 className="mb-2 text-[22px] font-extrabold tracking-[-0.025em] text-ink">
-                  Drop files in, copy results out
+                  Drop files in, download straight out
                 </h3>
                 <p className="text-sm leading-relaxed text-secondary">
-                  Drag files onto the terminal and they land in{" "}
-                  <code className={INLINE_CODE_CLASS}>/mnt/host</code>. Copy
-                  results back there to download them to your device.
+                  Drag files onto the terminal to drop them directly into{" "}
+                  <code className={INLINE_CODE_CLASS}>~</code> (auto-saved), and
+                  click <strong className="font-semibold text-ink">Download</strong>{" "}
+                  to export any file straight back to your device.
                 </p>
               </article>
 

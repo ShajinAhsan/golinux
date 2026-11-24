@@ -1,21 +1,27 @@
-/* File transfer UI: Upload into /mnt/host and Option A Download from /mnt/host.
+/* File transfer UI: direct Upload/Drag-and-drop & Download for ~ (/root),
+ * with automatic /mnt/host staging for large files (> 10 MB) so /root
+ * autosaves stay fast and mobile-RAM safe.
  *
  * INV-1: ZERO bytes are ever sent to guest stdin (no echo, no tar, no rm).
- *   - Upload: writes via emulator.create_file("/" + safeName, data) into the
- *     9p share (/mnt/host) and updates #persistStatus only.
- *   - Download: walks emulator.fs9p to list files in /mnt/host, checks size
- *     against device memory cap BEFORE reading, and downloads via
- *     emulator.read_file("/" + path).
+ *   - Normal uploads (<= 10 MB): write directly into ~ (/root) via 9p
+ *     create_file("/root/" + safeName, data) and auto-save to OPFS.
+ *   - Large uploads (> 10 MB, up to 50 MB): write to temporary /mnt/host
+ *     so they never bloat every 350 ms /root autosave.
+ *   - Download modal: lists user files directly from ~ (/root) plus any
+ *     temporary files in /mnt/host, reading via emulator.read_file().
  */
 
 import { setPersistStatus } from "./status.js";
 
-const UPLOAD_LIMIT = 50 * 1024 * 1024;
-const UPLOAD_DIR = "/mnt/host";
+export const UPLOAD_LIMIT = 50 * 1024 * 1024;
+export const LARGE_HOME_UPLOAD_BYTES = 10 * 1024 * 1024;
+
 const S_IFMT = 0xf000;
 const S_IFDIR = 0x4000;
 const S_IFREG = 0x8000;
 const MAX_WALK_DEPTH = 4;
+const SKIP_ROOT_FILES = new Set([".bash_profile", ".bashrc"]);
+const SKIP_ROOT_DIRS = new Set([".cache", ".config"]);
 
 let uploadInFlight = false;
 let downloadInFlight = false;
@@ -43,20 +49,40 @@ function downloadLimitBytes() {
   return isMobile ? 30 * 1024 * 1024 : 300 * 1024 * 1024;
 }
 
-function findHostDirId(fs) {
-  if (!fs || !Array.isArray(fs.inodes) || !fs.inodes[0]) return 0;
-  if (typeof window !== "undefined" && window.Go9p && typeof window.Go9p.findHostDirId === "function") {
-    const id = window.Go9p.findHostDirId(fs);
-    if (id > 0) return id;
+function findSubdirId(fs, name) {
+  if (!fs || !Array.isArray(fs.inodes) || !fs.inodes[0]) return -1;
+  if (typeof fs.Search === "function") {
+    try {
+      const id = fs.Search(0, name);
+      if (typeof id === "number" && id > 0 && fs.inodes[id] && ((fs.inodes[id].mode & S_IFMT) === S_IFDIR)) {
+        return id;
+      }
+    } catch (_) {}
   }
   const root = fs.inodes[0];
   if (root && root.direntries instanceof Map) {
-    const id = root.direntries.get("host");
+    const id = root.direntries.get(name);
     if (typeof id === "number" && id > 0 && fs.inodes[id] && ((fs.inodes[id].mode & S_IFMT) === S_IFDIR)) {
       return id;
     }
   }
-  return 0;
+  return -1;
+}
+
+function findRootDirId(fs) {
+  if (typeof window !== "undefined" && window.Go9p && typeof window.Go9p.findRootDirId === "function") {
+    return window.Go9p.findRootDirId(fs);
+  }
+  return findSubdirId(fs, "root");
+}
+
+function findHostDirId(fs) {
+  if (typeof window !== "undefined" && window.Go9p && typeof window.Go9p.findHostDirId === "function") {
+    const id = window.Go9p.findHostDirId(fs);
+    if (id > 0) return id;
+  }
+  const id = findSubdirId(fs, "host");
+  return id > 0 ? id : 0;
 }
 
 function hostMountPrefix(fs) {
@@ -64,13 +90,33 @@ function hostMountPrefix(fs) {
 }
 
 /**
- * List all regular files currently in v86's /mnt/host 9p share.
- * Pure traversal over fs.inodes (exported for unit testing).
- * Returns [{ path, name, size }] sorted alphabetically by path.
+ * Decide where an uploaded file should land:
+ *   - <= 10 MB when 9p /root is mounted -> ~ (/root), auto-persisted.
+ *   - > 10 MB (or cold-boot fallback without 9p /root) -> /mnt/host (temporary).
  */
-export function listHostFiles(fs) {
-  if (!fs || !Array.isArray(fs.inodes) || !fs.inodes[0]) return [];
-  const startId = findHostDirId(fs);
+export function resolveUploadTarget(fs, fileSize) {
+  const rootId = findRootDirId(fs);
+  const hostId = findHostDirId(fs);
+  if (rootId > 0 && !(fileSize > LARGE_HOME_UPLOAD_BYTES)) {
+    return {
+      dirId: rootId,
+      prefix: "/root/",
+      guestDir: "~",
+      persistent: true,
+      reason: "home",
+    };
+  }
+  return {
+    dirId: hostId,
+    prefix: hostId > 0 ? "/host/" : "/",
+    guestDir: "/mnt/host",
+    persistent: false,
+    reason: rootId > 0 ? "large" : "fallback",
+  };
+}
+
+function walkRegularFiles(fs, startId, { skipRootDefaults = false } = {}) {
+  if (!fs || !Array.isArray(fs.inodes) || !fs.inodes[startId]) return [];
   const results = [];
   const visited = new Set();
 
@@ -84,11 +130,14 @@ export function listHostFiles(fs) {
       if (name === "." || name === "..") continue;
       const child = fs.inodes[childId];
       if (!child || typeof child.mode !== "number") continue;
+      if (child.status === 4 || child.status === -1) continue;
       const rel = prefix ? `${prefix}/${name}` : name;
       const kind = child.mode & S_IFMT;
       if (kind === S_IFDIR) {
+        if (skipRootDefaults && depth === 0 && SKIP_ROOT_DIRS.has(name)) continue;
         walk(childId, rel, depth + 1);
       } else if (kind === S_IFREG) {
+        if (skipRootDefaults && depth === 0 && SKIP_ROOT_FILES.has(name)) continue;
         const size = typeof child.size === "number"
           ? child.size
           : (fs.inodedata && fs.inodedata[childId] ? fs.inodedata[childId].byteLength : 0);
@@ -100,6 +149,91 @@ export function listHostFiles(fs) {
   walk(startId, "", 0);
   results.sort((a, b) => a.path.localeCompare(b.path));
   return results;
+}
+
+/**
+ * List all regular files currently in v86's /mnt/host 9p share.
+ * Pure traversal over fs.inodes (exported for unit testing).
+ * Returns [{ path, name, size }] sorted alphabetically by path.
+ */
+export function listHostFiles(fs) {
+  if (!fs || !Array.isArray(fs.inodes) || !fs.inodes[0]) return [];
+  return walkRegularFiles(fs, findHostDirId(fs));
+}
+
+/**
+ * List downloadable files directly from ~ (/root) first, followed by any
+ * temporary files in /mnt/host.
+ * Returns [{ area, path, displayPath, fsPath, name, size }].
+ */
+export function listDownloadableFiles(fs) {
+  if (!fs || !Array.isArray(fs.inodes) || !fs.inodes[0]) return [];
+  const items = [];
+  const rootId = findRootDirId(fs);
+  if (rootId > 0) {
+    for (const f of walkRegularFiles(fs, rootId, { skipRootDefaults: true })) {
+      items.push({
+        area: "root",
+        path: f.path,
+        displayPath: "~/" + f.path,
+        fsPath: "/root/" + f.path,
+        name: f.name,
+        size: f.size,
+      });
+    }
+  }
+  const hostPrefix = hostMountPrefix(fs);
+  for (const f of walkRegularFiles(fs, findHostDirId(fs))) {
+    items.push({
+      area: "host",
+      path: f.path,
+      displayPath: "/mnt/host/" + f.path,
+      fsPath: hostPrefix + f.path,
+      name: f.name,
+      size: f.size,
+    });
+  }
+  return items;
+}
+
+/**
+ * Write a single uploaded file into ~ (/root) or /mnt/host cleanly:
+ *   - Refuses to overwrite an existing directory.
+ *   - Unlinks any existing regular file/symlink first and frees its inodedata
+ *     buffer (prevents v86 CreateBinaryFile RAM leak on re-uploads).
+ */
+export async function writeUploadedFile(emu, safeName, data) {
+  const fs = emu && emu.fs9p;
+  const target = resolveUploadTarget(fs, data.byteLength);
+
+  if (fs && Array.isArray(fs.inodes) && fs.inodes[target.dirId]) {
+    const dir = fs.inodes[target.dirId];
+    const existingId = typeof fs.Search === "function"
+      ? fs.Search(target.dirId, safeName)
+      : (dir.direntries instanceof Map && dir.direntries.has(safeName) ? dir.direntries.get(safeName) : -1);
+    if (existingId > 0 && fs.inodes[existingId]) {
+      if ((fs.inodes[existingId].mode & S_IFMT) === S_IFDIR) {
+        throw new Error(`cannot overwrite directory ${target.guestDir}/${safeName}`);
+      }
+      if (typeof fs.Unlink === "function") {
+        fs.Unlink(target.dirId, safeName);
+      } else if (dir.direntries instanceof Map) {
+        dir.direntries.delete(safeName);
+      }
+      if (fs.inodedata && existingId in fs.inodedata) {
+        delete fs.inodedata[existingId];
+      }
+    }
+  }
+
+  await emu.create_file(target.prefix + safeName, data);
+
+  // CreateBinaryFile fires NotifyListeners("newfile") while size===0 before
+  // set_data finishes; mark dirty after write completes so autosave captures bytes.
+  if (target.persistent && typeof window !== "undefined" && window.GoPersist && window.GoPersist.markDirty) {
+    window.GoPersist.markDirty();
+  }
+  return target;
 }
 
 export async function uploadFiles(fileList) {
@@ -123,11 +257,21 @@ export async function uploadFiles(fileList) {
       try {
         setPersistStatus(`Uploading ${safeName}…`, "");
         const data = new Uint8Array(await file.arrayBuffer());
-        await emu.create_file(hostMountPrefix(emu.fs9p) + safeName, data);
-        setPersistStatus(
-          `Uploaded ${safeName} -> ${UPLOAD_DIR}/${safeName} (temporary; cp to /root to keep).`,
-          "ok"
-        );
+        const target = await writeUploadedFile(emu, safeName, data);
+        if (target.persistent) {
+          setPersistStatus(`Uploaded ${safeName} -> ~/${safeName} (auto-saved).`, "ok");
+        } else if (target.reason === "large") {
+          setPersistStatus(
+            `Uploaded ${safeName} (${humanSize(data.byteLength)}) -> /mnt/host/${safeName} ` +
+            `(files > 10 MB stay temporary so ~ saves stay fast).`,
+            "ok"
+          );
+        } else {
+          setPersistStatus(
+            `Uploaded ${safeName} -> /mnt/host/${safeName} (temporary; cp to ~ to keep).`,
+            "ok"
+          );
+        }
       } catch (e) {
         setPersistStatus(`Upload failed: ${(e && e.message) || e}`, "error");
       }
@@ -137,13 +281,18 @@ export async function uploadFiles(fileList) {
   }
 }
 
-export async function downloadHostFile(relPath, expectedSize, statusEl) {
+export async function downloadHostFile(pathOrEntry, expectedSize, statusEl) {
   const emu = window.emulator;
   if (!emu || downloadInFlight) return false;
 
+  const isEntry = pathOrEntry && typeof pathOrEntry === "object";
+  const label = isEntry ? (pathOrEntry.displayPath || pathOrEntry.path) : String(pathOrEntry || "");
+  const fsPath = isEntry ? pathOrEntry.fsPath : (hostMountPrefix(emu.fs9p) + label);
+  const sizeHint = isEntry ? pathOrEntry.size : expectedSize;
+
   const limit = downloadLimitBytes();
-  if (typeof expectedSize === "number" && expectedSize > limit) {
-    const msg = `"${relPath}" is ${humanSize(expectedSize)}, over the ${humanSize(limit)} limit on this device.`;
+  if (typeof sizeHint === "number" && sizeHint > limit) {
+    const msg = `"${label}" is ${humanSize(sizeHint)}, over the ${humanSize(limit)} limit on this device.`;
     if (statusEl) { statusEl.textContent = msg; statusEl.className = "error"; }
     setPersistStatus(msg, "error");
     return false;
@@ -151,11 +300,11 @@ export async function downloadHostFile(relPath, expectedSize, statusEl) {
 
   downloadInFlight = true;
   try {
-    if (statusEl) { statusEl.textContent = `Reading ${relPath}…`; statusEl.className = ""; }
-    const data = await emu.read_file(hostMountPrefix(emu.fs9p) + relPath);
-    if (!data) throw new Error("file not found in /mnt/host");
+    if (statusEl) { statusEl.textContent = `Reading ${label}…`; statusEl.className = ""; }
+    const data = await emu.read_file(fsPath);
+    if (!data) throw new Error("file not found: " + label);
     if (data.byteLength > limit) {
-      const msg = `"${relPath}" is ${humanSize(data.byteLength)}, over the ${humanSize(limit)} limit.`;
+      const msg = `"${label}" is ${humanSize(data.byteLength)}, over the ${humanSize(limit)} limit.`;
       if (statusEl) { statusEl.textContent = msg; statusEl.className = "error"; }
       setPersistStatus(msg, "error");
       return false;
@@ -165,13 +314,13 @@ export async function downloadHostFile(relPath, expectedSize, statusEl) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = relPath.split("/").pop() || "download";
+    a.download = (isEntry ? pathOrEntry.name : label.split("/").pop()) || "download";
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
 
-    const okMsg = `Downloaded ${relPath} (${humanSize(blob.size)})`;
+    const okMsg = `Downloaded ${label} (${humanSize(blob.size)})`;
     if (statusEl) { statusEl.textContent = okMsg; statusEl.className = "ok"; }
     setPersistStatus(okMsg, "ok");
     return true;
@@ -199,13 +348,13 @@ function setupDownloadModal() {
     listEl.textContent = "";
 
     const emu = window.emulator;
-    const files = emu && emu.fs9p ? listHostFiles(emu.fs9p) : [];
+    const files = emu && emu.fs9p ? listDownloadableFiles(emu.fs9p) : [];
 
     if (!files.length) {
       const empty = document.createElement("div");
       empty.id = "filesEmpty";
       empty.textContent =
-        "No files in /mnt/host yet. Copy a file from the terminal (e.g. cp file.txt /mnt/host/), then tap Refresh.";
+        "No user files in ~ (/root) or /mnt/host yet. Create a file in ~ (or copy one into /mnt/host/), then tap Refresh.";
       listEl.appendChild(empty);
       return;
     }
@@ -218,10 +367,10 @@ function setupDownloadModal() {
       info.className = "hf-info";
       const nameEl = document.createElement("div");
       nameEl.className = "hf-name";
-      nameEl.textContent = f.path;
+      nameEl.textContent = f.displayPath;
       const sizeEl = document.createElement("div");
       sizeEl.className = "hf-size";
-      sizeEl.textContent = humanSize(f.size);
+      sizeEl.textContent = humanSize(f.size) + (f.area === "host" ? " · temporary" : "");
       info.appendChild(nameEl);
       info.appendChild(sizeEl);
 
@@ -229,7 +378,8 @@ function setupDownloadModal() {
       btn.type = "button";
       btn.textContent = "Download";
       btn.setAttribute("data-download-path", f.path);
-      btn.onclick = () => downloadHostFile(f.path, f.size, statusEl);
+      btn.setAttribute("data-download-area", f.area);
+      btn.onclick = () => downloadHostFile(f, f.size, statusEl);
 
       row.appendChild(info);
       row.appendChild(btn);

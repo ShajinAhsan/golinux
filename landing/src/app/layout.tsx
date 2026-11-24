@@ -45,9 +45,9 @@ export const metadata: Metadata = {
     "OPFS",
     "GoLinux",
   ],
-  authors: [{ name: "GoLinux", url: SITE.githubUrl }],
-  creator: "GoLinux",
-  publisher: "GoLinux",
+  authors: [{ name: SITE.authorName, url: SITE.authorGithubUrl }],
+  creator: SITE.authorName,
+  publisher: SITE.authorName,
   category: "Developer Tools",
   alternates: {
     canonical: "/",

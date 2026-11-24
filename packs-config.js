@@ -11,7 +11,7 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v35";
+const GL_VERSION = "v36";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
  * (e.g. virtio_console, virtio_net, memory_size, OS image) changes so incompatible
@@ -33,7 +33,7 @@ const GL_FEATURES = Object.freeze({
   upload: true,          // 9p create_file() into /mnt/host (zero stdin injection)
   download: true,        // /mnt/host file browser using 9p read_file() (zero stdin injection)
   restartButton: true,   // safe snapshot restart (re-instantiates V86; never SeaBIOS reboot)
-  network: true,         // opt-in zero-server browser Fetch + DoH over virtio-net (OFF by default)
+  network: false,        // dormant for now (adapter kept intact; flip to true to re-enable Net UI)
 });
 
 /* Authoritative app-shell file list, shared by sw.js (precache) and
@@ -74,6 +74,7 @@ const GL_SHELL_FILES = Object.freeze([
   "assets/empty-chunk.zst",
   "chunks-precache.json",
   "bundles.json",
+  "icons/favicon.svg",
   "icons/icon-192.png",
   "icons/icon-512.png",
 ]);

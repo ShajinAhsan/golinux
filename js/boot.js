@@ -22,14 +22,19 @@ import { initChunkFallback } from "./chunk-fallback.js";
 import { SafeFetchNetworkAdapter } from "./net-adapter.js";
 import { handleBlockedPortHint, isNetDesiredEnabled, syncNetUI } from "./net-ui.js";
 
-const FRESH_MOTD = [
-  "",
-  "  \x1b[1;32mGoLinux\x1b[0m \x1b[2m· Alpine Linux 3.21 (x86) · BusyBox + TinyCC · 128 MB WASM VM\x1b[0m",
-  "  \x1b[36mTools:\x1b[0m tcc/gcc (instant C), python3, git, make, nano, vi, tmux, htop, jq, tree, man",
-  "  \x1b[35mFun:\x1b[0m   fastfetch, cowsay, figlet, sl",
-  "  \x1b[2mOffline by default · optional Net toggle (browser Fetch) · /root persists · /mnt/host transfer\x1b[0m",
-  "",
-].join("\r\n");
+function buildFreshMotd() {
+  const netBit = (typeof GL_FEATURES !== "undefined" && GL_FEATURES.network)
+    ? "Offline by default · optional Net toggle · "
+    : "Offline sandbox · ";
+  return [
+    "",
+    "  \x1b[1;32mGoLinux\x1b[0m \x1b[2m· Alpine Linux 3.21 (x86) · BusyBox + TinyCC · 128 MB WASM VM\x1b[0m",
+    "  \x1b[36mTools:\x1b[0m tcc/gcc (instant C), python3, git, make, nano, vi, tmux, htop, jq, tree, man",
+    "  \x1b[35mFun:\x1b[0m   fastfetch, cowsay, figlet, sl",
+    `  \x1b[2m${netBit}~ (/root) auto-saves · drag & drop files straight into ~\x1b[0m`,
+    "",
+  ].join("\r\n");
+}
 
 const swSupported = "serviceWorker" in navigator && !!navigator.serviceWorker;
 
@@ -501,7 +506,7 @@ export async function bootMachine() {
       const restoreNote = savedRoot
         ? `  \x1b[32m[saved /root restored · ${restoredCount} file${restoredCount === 1 ? "" : "s"}]\x1b[0m\r\n`
         : "";
-      term.write(FRESH_MOTD + restoreNote + "\r\n\x1b[1;32mroot@golinux\x1b[0m:\x1b[1;34m~\x1b[0m# ");
+      term.write(buildFreshMotd() + restoreNote + "\r\n\x1b[1;32mroot@golinux\x1b[0m:\x1b[1;34m~\x1b[0m# ");
     }
 
     // Resize xterm.js and send out-of-band virtio-console0-resize (zero stdin).
