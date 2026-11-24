@@ -9,7 +9,7 @@
 
 import { fmtBytes, fmtEta, fmtSpeed, getLastNetworkInfo } from "./status.js";
 import { cachedChunkNameSet, INSTANT_TOOLS, loadToolSets } from "./tool-progress.js";
-import { getWarmState, isAutoWarmEnabled, setAutoWarmEnabled } from "./prefetch.js";
+import { getWarmState, isAutoWarmEnabled, setAutoWarmEnabled, suspendWarmingForSession } from "./prefetch.js";
 
 const BW_PREF_KEY = "golinux.bwMode";
 
@@ -86,8 +86,13 @@ export function setupPacksUI() {
 
   let packManifest = {};
   let currentBwPref = getSavedBwPref();
+  let wasBusy = false;
+  let lastWarmTool = "";
+
+  const isModalVisible = () => !!(packsEl && packsEl.classList.contains("visible"));
 
   function renderBandwidth(infoOverride) {
+    if (!isModalVisible()) return;
     const info = infoOverride || getLastNetworkInfo();
     const bps = info && info.bps > 0 ? info.bps : null;
     const mode = (info && (info.mode === "slow" || info.mode === "fast"))
@@ -109,12 +114,19 @@ export function setupPacksUI() {
 
   function renderWarmState(state) {
     const st = state || getWarmState();
+    if (!isModalVisible()) {
+      lastWarmTool = st.tool || "";
+      return;
+    }
     if (autoWarmToggle) autoWarmToggle.checked = !!st.enabled;
     if (autoWarmStateEl) {
       autoWarmStateEl.textContent = st.status ? `(${st.status})` : "";
     }
-    if (packsEl && packsEl.classList.contains("visible") && st.status &&
-        (st.status === "all warmed" || st.status === "core tools warmed" || st.status.startsWith("warming"))) {
+    // Only re-scan & redraw the tool grid when a whole tool finishes warming
+    // (tool title changed) or warming completes — never on every single chunk!
+    const toolChanged = (st.tool || "") !== lastWarmTool;
+    lastWarmTool = st.tool || "";
+    if (toolChanged || st.status === "all warmed" || st.status === "core tools warmed") {
       renderToolsGrid();
     }
   }
@@ -311,9 +323,16 @@ export function setupPacksUI() {
 
   window.GoPacks.onUpdate((s) => {
     renderPackProgress(s);
-    renderPacks(s.states);
-    if (packsEl && packsEl.classList.contains("visible")) {
-      renderToolsGrid();
+    const nowBusy = !!(s && s.job);
+    const transition = nowBusy !== wasBusy;
+    wasBusy = nowBusy;
+    // During an active download, only update the lightweight progress bar;
+    // rebuild pack rows & tool chips only on job start/end or when idle.
+    if (transition || !nowBusy) {
+      if (isModalVisible()) {
+        renderPacks(s.states);
+        renderToolsGrid();
+      }
     }
   });
 
@@ -353,11 +372,13 @@ export function setupPacksUI() {
     clearAllBtn.onclick = async () => {
       if (!window.confirm("Clear all cached packs and preloaded tools? Your saved files in /root and boot snapshot stay intact.")) return;
       packStatusEl.textContent = "";
+      suspendWarmingForSession();
       const res = await window.GoPacks.clearToolCaches();
       if (res && res.refused) packStatusEl.textContent = res.reason;
       else if (res && res.error) packStatusEl.textContent = "Failed: " + res.error;
       else packStatusEl.textContent = `Cleared ${res && res.deleted ? res.deleted : 0} cached chunks.`;
       renderPacks(await window.GoPacks.packStates());
+      renderWarmState();
       showQuota(true);
       await renderToolsGrid();
     };

@@ -619,16 +619,19 @@
     let chunkBytes = 0;
     let snapshotBytes = 0;
     let count = 0;
-    for (const cname of [GL_PACK_CACHE, GL_DATA_CACHE]) {
+    for (const cname of [GL_DATA_CACHE, GL_PACK_CACHE]) {
       try {
         const c = await caches.open(cname);
         for (const req of await c.keys()) {
-          const pathname = new URL(req.url).pathname;
-          if (typeof GL_SNAPSHOT_URL === "string" && pathname.endsWith(GL_SNAPSHOT_URL)) {
+          const u = req.url;
+          const q = u.indexOf("?");
+          const clean = q >= 0 ? u.slice(0, q) : u;
+          if (typeof GL_SNAPSHOT_URL === "string" && clean.endsWith(GL_SNAPSHOT_URL)) {
             snapshotBytes = (manifest && manifest.minimal && manifest.minimal.snapshotBytes) || (9.1 * 1048576);
             continue;
           }
-          const name = pathname.split("/").pop();
+          const slash = clean.lastIndexOf("/");
+          const name = slash >= 0 ? clean.slice(slash + 1) : clean;
           const meta = bIdx && bIdx.chunkToBundle && bIdx.chunkToBundle.get(name);
           if (meta) {
             chunkBytes += meta.len;

@@ -1,10 +1,10 @@
 /* Polite, yield-immediately background tool pre-warmer.
  *
  * Uses idle time (after boot and >= 3 s of disk silence) to quietly warm
- * everyday tools in smallest-first order. Any foreground disk read immediately
- * aborts the in-flight background chunk so user commands always get 100% of
- * slow 500 Kbps - 1 Mbps links. Respects navigator.connection.saveData and
- * user toggle in localStorage["golinux.autowarm"].
+ * everyday tools in smallest-first order using an O(1) in-memory queue built
+ * from a SINGLE CacheStorage scan (zero per-chunk cache.keys() / URL parsing).
+ * Any foreground disk read immediately aborts the in-flight background chunk so
+ * user commands always get 100% of slow 500 Kbps - 1 Mbps links.
  */
 
 import { cachedChunkNameSet, loadToolSets } from "./tool-progress.js";
@@ -23,6 +23,7 @@ export const WARM_PRIORITY = Object.freeze([
 ]);
 
 let enabled = true;
+let suspendedForSession = false;
 let started = false;
 let busyForeground = false;
 let idleTimer = null;
@@ -31,6 +32,7 @@ let pendingResolve = null;
 let warmedBytes = 0;
 let currentToolTitle = "";
 let statusText = "idle";
+let pendingQueue = null; // null = not built yet; Array<{ tool, chunk }> once scanned
 let onChange = () => {};
 
 function browserSaysSaveData() {
@@ -49,21 +51,33 @@ export function isAutoWarmEnabled() {
 
 export function setAutoWarmEnabled(val) {
   enabled = !!val;
+  suspendedForSession = false;
   try { localStorage.setItem(PREF_KEY, enabled ? "on" : "off"); } catch (_) {}
   if (!enabled) {
     abortWarm();
     statusText = "off";
     emit();
   } else {
+    pendingQueue = null;
     statusText = "waiting for idle";
     emit();
     scheduleNext(800);
   }
 }
 
+/** Pause auto-warming for the rest of this tab session (e.g. after user clicks Clear cache). */
+export function suspendWarmingForSession() {
+  suspendedForSession = true;
+  pendingQueue = null;
+  abortWarm();
+  currentToolTitle = "";
+  statusText = "paused (cache cleared)";
+  emit();
+}
+
 export function getWarmState() {
   return {
-    enabled,
+    enabled: enabled && !suspendedForSession,
     status: statusText,
     tool: currentToolTitle,
     warmedBytes,
@@ -91,7 +105,7 @@ function currentBudgetBytes() {
 }
 
 function canRunNow() {
-  if (!GL_FEATURES.prefetch || !enabled || !started) return false;
+  if (!GL_FEATURES.prefetch || !enabled || suspendedForSession || !started) return false;
   if (busyForeground) return false;
   if (typeof document !== "undefined" && document.hidden) return false;
   if (typeof navigator !== "undefined" && navigator.onLine === false) return false;
@@ -104,7 +118,7 @@ function canRunNow() {
 function scheduleNext(delayMs) {
   clearTimeout(idleTimer);
   idleTimer = null;
-  if (!enabled || !started) return;
+  if (!enabled || suspendedForSession || !started) return;
   if (warmedBytes >= currentBudgetBytes()) {
     statusText = "ready";
     currentToolTitle = "";
@@ -117,20 +131,27 @@ function scheduleNext(delayMs) {
   }, delayMs);
 }
 
-async function pickNextChunk() {
+/** Build the flat deduplicated queue ONCE per warming pass (O(1) pop thereafter). */
+async function ensureQueue() {
+  if (pendingQueue !== null) return pendingQueue;
   const sets = await loadToolSets();
   if (!sets) return null;
   const have = await cachedChunkNameSet();
+  const seen = new Set();
+  const q = [];
   for (const id of WARM_PRIORITY) {
     const t = sets[id];
     if (!t || !Array.isArray(t.list)) continue;
+    const title = t.title || id;
     for (const ch of t.list) {
-      if (!have.has(ch)) {
-        return { tool: t.title || id, chunk: ch };
+      if (!have.has(ch) && !seen.has(ch)) {
+        seen.add(ch);
+        q.push({ tool: title, chunk: ch });
       }
     }
   }
-  return null;
+  pendingQueue = q;
+  return pendingQueue;
 }
 
 function sendWarmToSW(chunk) {
@@ -155,21 +176,26 @@ async function runStep() {
   if (runningStep || !canRunNow()) return;
   runningStep = true;
   try {
-    const next = await pickNextChunk();
-    if (!next) {
+    const q = await ensureQueue();
+    if (!q || q.length === 0) {
       currentToolTitle = "";
       statusText = "all warmed";
       emit();
       return;
     }
     if (!canRunNow()) return;
-    currentToolTitle = next.tool;
-    statusText = `warming ${next.tool}…`;
-    emit();
+    const next = q.shift();
+    if (next.tool !== currentToolTitle || statusText !== `warming ${next.tool}…`) {
+      currentToolTitle = next.tool;
+      statusText = `warming ${next.tool}…`;
+      emit();
+    }
 
     const res = await sendWarmToSW(next.chunk);
     if (res && res.bytes > 0) warmedBytes += res.bytes;
     if (res && res.aborted) {
+      // Put aborted chunk back at the front so it finishes when idle returns.
+      if (pendingQueue) pendingQueue.unshift(next);
       statusText = "yielded to command";
       emit();
       if (canRunNow()) scheduleNext(IDLE_DELAY_MS);
@@ -181,7 +207,6 @@ async function runStep() {
       emit();
       return;
     }
-    // Brief breather between chunks so the browser stays silky smooth.
     if (canRunNow()) scheduleNext(120);
   } finally {
     runningStep = false;
@@ -200,7 +225,7 @@ export function notifyDiskBusy(busy) {
       statusText = "paused for command";
       emit();
     }
-  } else if (enabled && started) {
+  } else if (enabled && !suspendedForSession && started) {
     scheduleNext(IDLE_DELAY_MS);
   }
 }
@@ -213,16 +238,16 @@ export function setupPrefetch(opts) {
 
   window.addEventListener("gl-emulator-ready", () => {
     started = true;
-    if (enabled) scheduleNext(IDLE_DELAY_MS);
+    if (enabled && !suspendedForSession) scheduleNext(IDLE_DELAY_MS);
   });
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) abortWarm();
-    else if (enabled && started && !busyForeground) scheduleNext(IDLE_DELAY_MS);
+    else if (enabled && !suspendedForSession && started && !busyForeground) scheduleNext(IDLE_DELAY_MS);
   });
 
   window.addEventListener("offline", () => abortWarm());
   window.addEventListener("online", () => {
-    if (enabled && started && !busyForeground) scheduleNext(IDLE_DELAY_MS);
+    if (enabled && !suspendedForSession && started && !busyForeground) scheduleNext(IDLE_DELAY_MS);
   });
 }

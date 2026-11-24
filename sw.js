@@ -707,7 +707,7 @@ function currentBandwidthMode() {
 
 async function isChunkCached(name, pathnamePrefix) {
   const key = new Request(self.location.origin + pathnamePrefix + name, { method: "GET" });
-  for (const cname of [GL_PACK_CACHE, GL_DATA_CACHE]) {
+  for (const cname of [GL_DATA_CACHE, GL_PACK_CACHE]) {
     try {
       const c = await caches.open(cname);
       if (await c.match(key, { ignoreSearch: true })) return true;
@@ -874,7 +874,7 @@ self.addEventListener("fetch", (event) => {
       event.respondWith((async () => {
         await assetBaseReady;
         const cacheKey = new Request(self.location.origin + url.pathname, { method: "GET" });
-        const hit = await headFromCache(cacheKey, [GL_PACK_CACHE, GL_DATA_CACHE]);
+        const hit = await headFromCache(cacheKey, [GL_DATA_CACHE, GL_PACK_CACHE]);
         if (hit) return hit;
 
         const name = url.pathname.split("/").pop();
@@ -921,7 +921,7 @@ self.addEventListener("fetch", (event) => {
       await assetBaseReady;
 
       const cacheKey = new Request(self.location.origin + url.pathname, { method: "GET" });
-      for (const cname of [GL_PACK_CACHE, GL_DATA_CACHE]) {
+      for (const cname of [GL_DATA_CACHE, GL_PACK_CACHE]) {
         const cache = await caches.open(cname);
         const hit = await cache.match(cacheKey, { ignoreSearch: true });
         if (hit) return hit;

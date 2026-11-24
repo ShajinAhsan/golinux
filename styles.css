@@ -55,7 +55,6 @@ html, body {
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-  will-change: transform;
 }
 
 [hidden] { display: none !important; }

@@ -98,14 +98,21 @@ export async function loadToolSets() {
   return toolSetsInFlight;
 }
 
+function urlBasename(urlStr) {
+  const q = urlStr.indexOf("?");
+  const clean = q >= 0 ? urlStr.slice(0, q) : urlStr;
+  const slash = clean.lastIndexOf("/");
+  return slash >= 0 ? clean.slice(slash + 1) : clean;
+}
+
 export async function cachedChunkNameSet() {
   const have = new Set();
   if (typeof caches === "undefined") return have;
-  for (const cn of [GL_PACK_CACHE, GL_DATA_CACHE]) {
+  for (const cn of [GL_DATA_CACHE, GL_PACK_CACHE]) {
     try {
       const c = await caches.open(cn);
       for (const req of await c.keys()) {
-        const name = new URL(req.url).pathname.split("/").pop();
+        const name = urlBasename(req.url);
         if (name) have.add(name);
       }
     } catch (e) { /* ignore */ }
@@ -179,6 +186,19 @@ export function setupToolProgress() {
     onNames(completedNames, activeNames) {
       const doneList = Array.isArray(completedNames) ? completedNames : [];
       const activeList = Array.isArray(activeNames) ? activeNames : [];
+
+      // Fast path: once activeTool is locked for this burst, tally chunks & pipeline
+      // without re-running matchTool() on every 200 ms progress tick.
+      if (activeTool && toolSets && toolSets[activeTool]) {
+        const cur = toolSets[activeTool];
+        for (const n of doneList) {
+          if (cur.names.has(n)) toolCounted.add(n);
+        }
+        toolCachedCount = Math.min(toolTotal, toolCounted.size);
+        pipelineNextToolChunks(activeTool);
+        return;
+      }
+
       for (const n of activeList) {
         if (!recentBurstNames.includes(n) && recentBurstNames.length < 128) recentBurstNames.push(n);
       }
@@ -189,30 +209,22 @@ export function setupToolProgress() {
       const tool = matchTool(recentBurstNames, toolSets);
       if (!tool) return;
 
-      if (tool !== activeTool) {
-        activeTool = tool;
-        toolTotal = toolSets[tool].list.length;
-        toolCounted = new Set();
-        toolPipelined = new Set();
-        for (const n of doneList) {
-          if (toolSets[tool].names.has(n)) toolCounted.add(n);
-        }
-        toolCachedCount = toolCounted.size;
-        cachedChunkNameSet().then((have) => {
-          if (activeTool !== tool) return;
-          for (const n of toolSets[tool].list) {
-            if (have.has(n)) toolCounted.add(n);
-          }
-          toolCachedCount = Math.min(toolTotal, toolCounted.size);
-          pipelineNextToolChunks(tool);
-        });
-      } else {
-        for (const n of doneList) {
-          if (toolSets[tool].names.has(n)) toolCounted.add(n);
+      activeTool = tool;
+      toolTotal = toolSets[tool].list.length;
+      toolCounted = new Set();
+      toolPipelined = new Set();
+      for (const n of doneList) {
+        if (toolSets[tool].names.has(n)) toolCounted.add(n);
+      }
+      toolCachedCount = toolCounted.size;
+      cachedChunkNameSet().then((have) => {
+        if (activeTool !== tool) return;
+        for (const n of toolSets[tool].list) {
+          if (have.has(n)) toolCounted.add(n);
         }
         toolCachedCount = Math.min(toolTotal, toolCounted.size);
         pipelineNextToolChunks(tool);
-      }
+      });
     },
     onBurstEnd() {
       activeTool = null;
