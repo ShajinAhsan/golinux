@@ -99,7 +99,10 @@ cp "$ROOT"/packs-config.js "$ROOT"/packs.js "$ROOT"/persist.js \
    "$ROOT"/persist-9p.js "$OUT"/
 cp "$ROOT"/sw.js "$OUT"/
 cp "$ROOT"/public/_headers "$OUT"/
-cp "$ROOT"/icons/*.png "$OUT/icons/"
+cp "$ROOT"/icons/*.png "$ROOT"/icons/*.svg "$OUT/icons/"
+if [ -f "$ROOT/favicon.ico" ]; then
+  cp "$ROOT/favicon.ico" "$OUT/"
+fi
 cp "$ROOT"/assets/xterm/xterm.js "$ROOT"/assets/xterm/xterm.css "$OUT/assets/xterm/"
 cp "$ROOT"/assets/bios/seabios.bin "$ROOT"/assets/bios/vgabios.bin "$OUT/assets/bios/"
 cp "$ROOT"/assets/v86/libv86.js "$ROOT"/assets/v86/v86.wasm \
