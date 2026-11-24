@@ -20,24 +20,26 @@ const TEMPLATE = path.join(DIR, "empty-chunk.zst");
 const OUT = path.join(DIR, "manifest.json");
 const OUT_ROOT = path.join(ROOT, "chunks-precache.json");
 
-// Size above which a chunk is considered to hold real data. Zeroed blocks
-// compress to ~25 bytes, so 200 is a safe threshold.
-const MIN_REAL_BYTES = 200;
+// Upper bound used only when searching for the canonical all-zero empty-chunk
+// template (a 128 KiB block of zeros compresses to ~25 bytes in zstd).
+// Real-chunk classification NEVER uses a size threshold — it requires exact
+// byte equality against empty-chunk.zst so small real files (like 24-byte
+// /etc/resolv.conf in a 49-byte zstd chunk) are NEVER misclassified as empty.
+const MAX_EMPTY_TEMPLATE_BYTES = 64;
 
 const files = fs.readdirSync(DIR).filter(f => /^chunk-\d+-\d+\.zst$/.test(f));
 
 // The empty-chunk template is regenerated here rather than required to exist:
 // build.sh recreates the whole chunk directory, which deletes it. Without this
 // the manifest step crashed (ENOENT) after a successful image rebuild.
-// Any chunk <= MIN_REAL_BYTES is a zeroed block; use the smallest as the
-// canonical template so builds do not depend on build order.
+// Use the smallest chunk as the canonical zero template so builds are deterministic.
 let template;
 if (fs.existsSync(TEMPLATE)) {
   template = fs.readFileSync(TEMPLATE);
 } else {
   const smallest = files
     .map((f) => [f, fs.statSync(path.join(DIR, f)).size])
-    .filter(([, size]) => size <= MIN_REAL_BYTES)
+    .filter(([, size]) => size <= MAX_EMPTY_TEMPLATE_BYTES)
     .sort((a, b) => a[1] - b[1])[0];
   if (!smallest) {
     throw new Error("no empty chunk found to use as the zero template in " + DIR);
@@ -54,13 +56,8 @@ let emptyCount = 0;
 for (const f of files) {
   const full = path.join(DIR, f);
   const size = fs.statSync(full).size;
-  if (size <= MIN_REAL_BYTES) {
-    emptyCount++;
-    continue;
-  }
-  // Guard against a non-zero chunk that still equals the zero template.
-  const buf = fs.readFileSync(full);
-  if (buf.equals(template)) {
+  // Exact byte match against empty-chunk.zst only (fast-path: different size => real data).
+  if (size === template.length && fs.readFileSync(full).equals(template)) {
     emptyCount++;
     continue;
   }

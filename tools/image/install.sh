@@ -185,6 +185,7 @@ modprobe virtio_net 2>/dev/null || true
 ip link set eth0 up 2>/dev/null || true
 ip addr replace 192.168.86.100/24 dev eth0 2>/dev/null || true
 ip route replace default via 192.168.86.1 dev eth0 2>/dev/null || true
+printf '%s\n' 'nameserver 192.168.86.1' > /etc/resolv.conf 2>/dev/null || true
 RCSEOF
 chmod +x /etc/init.d/rcS
 

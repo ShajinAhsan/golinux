@@ -615,6 +615,18 @@ async function launchChrome(profileDir, port) {
     check(toastSeen === true, "floating #diskToast appeared during cold multi-bundle load (python3/tools)");
     check(/NEW_TOOLS_OK/.test(toolsOut), "fastfetch, cowsay, python3, jq, tree all work cleanly");
 
+    // Regression: small chunks (<200 B compressed, e.g. /etc/resolv.conf = 49 B) must NEVER be zeroed
+    await setUserTyping(cdp, true);
+    const resolvOut = await runCmd(
+      cdp,
+      "grep -qx 'nameserver 192.168.86.1' /etc/resolv.conf && ip -4 addr show dev eth0 | grep -q '192.168.86.100/24' && echo NET_CFG_OK",
+      /NET_CFG_OK/,
+      15000,
+      "resolv.conf and eth0 intact on chunked disk"
+    );
+    await setUserTyping(cdp, false);
+    check(/NET_CFG_OK/.test(resolvOut), "chunked disk preserves /etc/resolv.conf (192.168.86.1) and eth0");
+
     /* --- 4. Out-of-band virtio-console resize preserves half-typed command & no-newline output --- */
     console.log("\n== virtio-console out-of-band resize ==");
     await setUserTyping(cdp, true);

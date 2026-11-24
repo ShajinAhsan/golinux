@@ -51,8 +51,8 @@ const PREP = [
   "rmdir /mnt/zf 2>/dev/null || true",
   "sync",
   "echo 3 > /proc/sys/vm/drop_caches",
-  // Pre-warm instant core binaries in page cache
-  "cat /bin/busybox /usr/local/bin/tcc /usr/local/bin/cowsay /usr/local/bin/clear /usr/bin/sl /bin/lsblk >/dev/null 2>&1 || true",
+  // Pre-warm instant core binaries and /etc/resolv.conf in page cache
+  "cat /etc/resolv.conf /bin/busybox /usr/local/bin/tcc /usr/local/bin/cowsay /usr/local/bin/clear /usr/bin/sl /bin/lsblk >/dev/null 2>&1 || true",
 ].join("; ");
 
 const serial = { text: "" };
@@ -104,6 +104,7 @@ function maybeStartPrep() {
     "fastfetch >/dev/null 2>&1 || echo 'FASTFETCH_FAILED'",
     "ip -4 addr show dev eth0 | grep -q '192.168.86.100/24' || echo 'ETH0_FAILED'",
     "ip -4 addr show dev lo | grep -q '127.0.0.1/8' || echo 'LO_FAILED'",
+    "grep -qx 'nameserver 192.168.86.1' /etc/resolv.conf || echo 'RESOLV_FAILED'",
     PREP,
     "echo PREP_VERIFIED",
   ].join("; ");
@@ -131,6 +132,7 @@ emulator.add_listener("serial0-output-byte", (byte) => {
     ["FASTFETCH_FAILED", "fastfetch failed to run"],
     ["ETH0_FAILED", "eth0 virtio-net did not configure 192.168.86.100/24"],
     ["LO_FAILED", "lo loopback interface is not up"],
+    ["RESOLV_FAILED", "/etc/resolv.conf missing nameserver 192.168.86.1"],
   ]) {
     if (phase === 1 && appeared(marker)) {
       console.error("[snapshot] ERROR: " + msg);
