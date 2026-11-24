@@ -26,6 +26,6 @@
     "html_handling": "none",
     // Only invoke worker.js for root/HTML subdomain routing; all static files
     // (JS, CSS, WASM, images, sw.js) are served directly from edge assets.
-    "run_worker_first": ["/", "/index.html", "/terminal", "/terminal/"]
+    "run_worker_first": ["/", "/index.html", "/about", "/about/", "/about.html", "/terminal", "/terminal/"]
   }
 }

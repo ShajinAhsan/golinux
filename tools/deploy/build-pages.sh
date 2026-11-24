@@ -76,8 +76,17 @@ esac
 rm -rf "$OUT"
 mkdir -p "$OUT/images" "$OUT/assets/xterm" "$OUT/assets/bios" "$OUT/assets/v86" "$OUT/icons"
 
-cp "$ROOT"/index.html "$ROOT"/terminal.html "$ROOT"/about.html "$ROOT"/manifest.json "$OUT"/
-for css in styles.css landing.css; do
+# Build and stage the Next.js landing page (index.html, about.html, _next/, SEO routes).
+echo "== Building Next.js landing page =="
+npm run build --prefix "$ROOT/landing"
+if [ ! -f "$ROOT/landing/out/index.html" ]; then
+  echo "ERROR: landing/out/index.html is missing after Next.js build." >&2
+  exit 1
+fi
+cp -R "$ROOT/landing/out"/. "$OUT"/
+
+cp "$ROOT"/terminal.html "$ROOT"/manifest.json "$OUT"/
+for css in styles.css; do
   if [ -f "$ROOT/$css" ]; then
     cp "$ROOT/$css" "$OUT/"
   fi

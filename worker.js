@@ -53,6 +53,12 @@ export default {
       return withHtmlHeaders(res);
     }
 
+    if (path === "/about" || path === "/about/" || path === "/about.html") {
+      const assetUrl = new URL("/about.html", url);
+      const res = await env.ASSETS.fetch(new Request(assetUrl, request));
+      return withHtmlHeaders(res);
+    }
+
     return env.ASSETS.fetch(request);
   },
 };

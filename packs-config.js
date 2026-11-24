@@ -11,7 +11,7 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v27";
+const GL_VERSION = "v28";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
  * (e.g. virtio_console, memory_size, OS image) changes so incompatible saved
@@ -41,7 +41,6 @@ const GL_SHELL_FILES = Object.freeze([
   "./",
   "index.html",
   "terminal.html",
-  "landing.css",
   "styles.css",
   "about.html",
   "manifest.json",
@@ -49,7 +48,6 @@ const GL_SHELL_FILES = Object.freeze([
   "packs.js",
   "persist.js",
   "persist-9p.js",
-  "js/landing.js",
   "js/main.js",
   "js/status.js",
   "js/boot.js",

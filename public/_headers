@@ -79,3 +79,19 @@
   ! Cache-Control
   Cache-Control: public, max-age=3600, must-revalidate
   Content-Type: application/json
+
+# Next.js content-hashed static bundles (CSS, JS, self-hosted fonts) for landing page.
+/_next/static/*
+  ! Cache-Control
+  Cache-Control: public, max-age=31536000, immutable
+
+# Extensionless OpenGraph / Twitter preview images emitted by Next.js metadata routes.
+/opengraph-image
+  ! Cache-Control
+  Cache-Control: public, max-age=86400, must-revalidate
+  Content-Type: image/png
+
+/twitter-image
+  ! Cache-Control
+  Cache-Control: public, max-age=86400, must-revalidate
+  Content-Type: image/png

@@ -50,3 +50,11 @@ HANDOFF.md
 # Local environment / secrets (none are used by this project, but never commit them)
 .env
 .env.*
+
+# Local notes and Next.js build outputs
+cloudflare-r2-free-tier.md
+landing/node_modules/
+landing/.next/
+landing/out/
+landing/tsconfig.tsbuildinfo
+landing/next-env.d.ts
