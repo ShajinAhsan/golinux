@@ -149,6 +149,7 @@ html, body {
   color: var(--fg-dim);
 }
 #persistStatus.ok { color: var(--emerald); }
+#persistStatus.dirty { color: var(--amber); cursor: pointer; }
 #persistStatus.warn { color: var(--amber); }
 #persistStatus.error { color: var(--rose); }
 

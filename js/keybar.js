@@ -254,10 +254,6 @@ export function attachKeyboardInterceptor(emulator) {
       clearLatches();
     }
 
-    if (window.GoPersist && window.GoPersist.markDirty) {
-      window.GoPersist.markDirty();
-    }
-
     const bytes = encoder.encode(data);
     if (isVirtio) {
       for (const b of bytes) pending.push(b);

@@ -17,7 +17,7 @@ const { V86 } = require(path.join(ROOT, "assets/v86/libv86.js"));
 const MEM_MB = Number(process.argv[2] || 128);
 const OUT = process.argv[3] || path.join(ROOT, "images/debian-state.bin");
 const BOOT_TIMEOUT_MS = Number(process.env.BOOT_TIMEOUT_MS || 120000);
-const FILL_MB = Number(process.env.FILL_MB || Math.max(64, MEM_MB - 24));
+const FILL_MB = Number(process.env.FILL_MB || Math.max(64, MEM_MB - 36));
 const DISK_BYTES = fs.statSync(path.join(ROOT, "images/debian.img")).size;
 const CMDLINE_EXTRA = "init_on_free=1 init_on_alloc=1";
 
@@ -57,7 +57,7 @@ const PREP = [
 
 const serial = { text: "" };
 const hvc = { text: "" };
-let phase = 0; // 0=booting -> 1=verifying & prepping -> 2=saving
+let phase = 0; // 0=booting -> 1=binding 9p /root & respawning hvc0 -> 2=verifying & prepping -> 3=saving
 
 const emulator = new V86({
   wasm_path: path.join(ROOT, "assets/v86/v86.wasm"),
@@ -81,22 +81,57 @@ const emulator = new V86({
 
 const started = Date.now();
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, "");
+let hvcLenBeforeRespawn = 0;
 
-function maybeStartPrep() {
+function maybeBindHost9p() {
   if (phase !== 0) return;
   if (!/root@golinux:~#\s*$/.test(stripAnsi(serial.text))) return;
   if (!/root@golinux:~#\s*$/.test(stripAnsi(hvc.text))) return;
-  if (!hvc.text.includes("\x1b[1;32mroot@golinux")) {
-    console.error("[snapshot] ERROR: hvc0 prompt missing ANSI colors: " + JSON.stringify(hvc.text.slice(-120)));
+  phase = 1;
+  hvcLenBeforeRespawn = hvc.text.length;
+  const bootSecs = (Date.now() - started) / 1000;
+  console.error(`\n[snapshot] Alpine ttyS0 + hvc0 ready after ${bootSecs.toFixed(1)}s at ${MEM_MB} MB; binding persistent 9p /root`);
+  // Mount host9p at /run/host9p with two isolated subtrees:
+  //   /run/host9p/root -> bind-mounted at /root (persisted in browser OPFS across fresh boots)
+  //   /run/host9p/host -> bind-mounted at /mnt/host (temporary upload/download transfer)
+  // Then respawn hvc0's login bash so its cwd points cleanly to the 9p /root inode.
+  const bindCmd = [
+    "mkdir -p /run/host9p",
+    "(mountpoint -q /run/host9p || mount --move /mnt/host /run/host9p)",
+    "mkdir -p /run/host9p/root /run/host9p/host",
+    "chmod 0700 /run/host9p/root",
+    "chmod 0755 /run/host9p/host",
+    "cp -a /root/. /run/host9p/root/",
+    "(mountpoint -q /root || mount --bind /run/host9p/root /root)",
+    "(mountpoint -q /mnt/host || mount --bind /run/host9p/host /mnt/host)",
+    "HVC_PID=$(for p in /proc/[0-9]*; do [ -r $p/comm ] && [ \"$(cat $p/comm)\" = bash ] && [ \"$(readlink $p/fd/0 2>/dev/null)\" = /dev/hvc0 ] && basename $p && break; done)",
+    "[ -n \"$HVC_PID\" ] && kill -9 $HVC_PID 2>/dev/null || true",
+    "printf 'BIND_9P_%s\\n' READY",
+  ].join(" && ");
+  emulator.serial0_send(bindCmd + "\n");
+}
+
+function maybeStartPrep() {
+  if (phase !== 1) return;
+  if (!serial.text.includes("BIND_9P_READY")) return;
+  const respawnedHvc = hvc.text.slice(hvcLenBeforeRespawn);
+  if (!/root@golinux:~#\s*$/.test(stripAnsi(respawnedHvc))) return;
+  if (!respawnedHvc.includes("\x1b[1;32mroot@golinux")) {
+    console.error("[snapshot] ERROR: respawned hvc0 prompt missing ANSI colors: " + JSON.stringify(respawnedHvc.slice(-120)));
     emulator.stop(); process.exit(1);
   }
-  phase = 1;
-  const bootSecs = (Date.now() - started) / 1000;
-  console.error(`\n[snapshot] Alpine ttyS0 + hvc0 ready after ${bootSecs.toFixed(1)}s at ${MEM_MB} MB; verifying & prepping RAM`);
+  const rootId = emulator.fs9p ? emulator.fs9p.Search(0, "root") : -1;
+  const hostId = emulator.fs9p ? emulator.fs9p.Search(0, "host") : -1;
+  if (!(rootId > 0) || !(hostId > 0)) {
+    console.error(`[snapshot] ERROR: expected fs9p /root and /host directories (got rootId=${rootId}, hostId=${hostId})`);
+    emulator.stop(); process.exit(1);
+  }
+  phase = 2;
+  console.error(`[snapshot] 9p /root (inode ${rootId}) & /mnt/host (inode ${hostId}) bound and hvc0 respawned; verifying & prepping RAM`);
   const verify = [
     MOTD,
     "grep -q 'GoLinux' /etc/motd || echo 'MOTD_WRITE_FAILED'",
-    "mountpoint -q /mnt/host || echo 'MOUNT_FAILED'",
+    "mountpoint -q /root && mountpoint -q /mnt/host || echo 'MOUNT_FAILED'",
     "HVC_PID=$(for p in /proc/[0-9]*; do [ -r $p/comm ] && [ \"$(cat $p/comm)\" = bash ] && [ \"$(readlink $p/fd/0 2>/dev/null)\" = /dev/hvc0 ] && basename $p && break; done)",
     "[ -n \"$HVC_PID\" ] && tr '\\0' '\\n' < /proc/$HVC_PID/environ | grep -qx 'TERM=xterm-256color' || echo 'HVC_TERM_FAILED'",
     "grep -q '__gl_prompt_sp' /root/.bashrc && grep -q 'ls --color=auto' /root/.bashrc || echo 'BASHRC_FAILED'",
@@ -105,14 +140,16 @@ function maybeStartPrep() {
     "ip -4 addr show dev eth0 | grep -q '192.168.86.100/24' || echo 'ETH0_FAILED'",
     "ip -4 addr show dev lo | grep -q '127.0.0.1/8' || echo 'LO_FAILED'",
     "grep -qx 'nameserver 192.168.86.1' /etc/resolv.conf || echo 'RESOLV_FAILED'",
+    "rm -rf /root/.cache /mnt/host/*",
     PREP,
-    "echo PREP_VERIFIED",
+    "printf 'PREP_%s\\n' VERIFIED",
   ].join("; ");
   emulator.serial0_send(verify + "\n");
 }
 
 emulator.add_listener("virtio-console0-output-bytes", (bytes) => {
   hvc.text += Buffer.from(bytes).toString("utf8");
+  maybeBindHost9p();
   maybeStartPrep();
 });
 
@@ -120,12 +157,13 @@ emulator.add_listener("serial0-output-byte", (byte) => {
   const c = String.fromCharCode(byte);
   serial.text += c;
   process.stdout.write(c);
+  maybeBindHost9p();
   maybeStartPrep();
 
   const appeared = (m) => serial.text.split(m).length - 1 >= 2;
   for (const [marker, msg] of [
     ["MOTD_WRITE_FAILED", "/etc/motd was not written"],
-    ["MOUNT_FAILED", "/mnt/host 9p mount failed"],
+    ["MOUNT_FAILED", "/root or /mnt/host 9p mount failed"],
     ["HVC_TERM_FAILED", "hvc0 bash does not have TERM=xterm-256color"],
     ["BASHRC_FAILED", "/root/.bashrc missing __gl_prompt_sp / ls --color=auto"],
     ["TCC_FAILED", "tcc failed to run"],
@@ -134,14 +172,14 @@ emulator.add_listener("serial0-output-byte", (byte) => {
     ["LO_FAILED", "lo loopback interface is not up"],
     ["RESOLV_FAILED", "/etc/resolv.conf missing nameserver 192.168.86.1"],
   ]) {
-    if (phase === 1 && appeared(marker)) {
+    if (phase === 2 && appeared(marker)) {
       console.error("[snapshot] ERROR: " + msg);
       emulator.stop(); process.exit(1);
     }
   }
 
-  if (phase === 1 && appeared("PREP_VERIFIED")) {
-    phase = 2;
+  if (phase === 2 && serial.text.includes("PREP_VERIFIED")) {
+    phase = 3;
     setTimeout(async () => {
       const state = await emulator.save_state();
       fs.writeFileSync(OUT, new Uint8Array(state));

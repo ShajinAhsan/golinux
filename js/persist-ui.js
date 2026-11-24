@@ -9,6 +9,29 @@ export function setupPersistUI() {
     setPersistStatus(msg, kind);
   });
 
+  const saveBtn = document.getElementById("saveBtn");
+  const triggerManualSave = async () => {
+    if (!window.emulator || !window.GoPersist) return;
+    if (saveBtn) saveBtn.disabled = true;
+    try {
+      await window.GoPersist.saveNow(window.emulator, "manual");
+    } finally {
+      if (saveBtn) saveBtn.disabled = false;
+    }
+  };
+  if (saveBtn) {
+    saveBtn.onclick = triggerManualSave;
+  }
+
+  const persistEl = document.getElementById("persistStatus");
+  if (persistEl) {
+    persistEl.addEventListener("click", () => {
+      if (window.GoPersist && window.GoPersist.isDirty && window.GoPersist.isDirty()) {
+        triggerManualSave();
+      }
+    });
+  }
+
   const resetBtn = document.getElementById("resetBtn");
   if (resetBtn) {
     resetBtn.onclick = async () => {

@@ -173,11 +173,23 @@ mount -t tmpfs tmpfs /run 2>/dev/null || true
 mount -o remount,rw / 2>/dev/null || true
 hostname -F /etc/hostname 2>/dev/null || hostname golinux
 dmesg -n 1 2>/dev/null || true
-# Load 9p modules and mount /mnt/host for zero-stdin browser Upload/Download
+# Load 9p modules and bind-mount persistent /root + temporary /mnt/host
 modprobe 9p 2>/dev/null || true
 modprobe 9pnet 2>/dev/null || true
 modprobe 9pnet_virtio 2>/dev/null || true
-mount -t 9p -o trans=virtio,version=9p2000.L host9p /mnt/host 2>/dev/null || true
+mkdir -p /run/host9p
+if mount -t 9p -o trans=virtio,version=9p2000.L host9p /run/host9p 2>/dev/null; then
+  mkdir -p /run/host9p/root /run/host9p/host
+  chmod 0700 /run/host9p/root 2>/dev/null || true
+  chmod 0755 /run/host9p/host 2>/dev/null || true
+  if [ -z "$(ls -A /run/host9p/root 2>/dev/null)" ]; then
+    cp -a /root/. /run/host9p/root/ 2>/dev/null || true
+  fi
+  mount --bind /run/host9p/root /root 2>/dev/null || true
+  mount --bind /run/host9p/host /mnt/host 2>/dev/null || true
+else
+  mount -t 9p -o trans=virtio,version=9p2000.L host9p /mnt/host 2>/dev/null || true
+fi
 # Bring up loopback and virtio-net eth0 with static virtual LAN config (0ms boot delay,
 # offline-safe by default; host browser SafeFetchNetworkAdapter gates outbound traffic).
 ip link set lo up 2>/dev/null || true

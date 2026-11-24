@@ -49,17 +49,22 @@
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
         Tools
       </button>
-      <button id="restart" class="ghost-btn" data-feature="restartButton" title="Restart virtual machine">
+      <button id="saveBtn" class="wide-only ghost-btn" title="Save /root files to browser storage now">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+        Save
+      </button>
+      <button id="restart" class="ghost-btn" data-feature="restartButton" title="Start a fresh shell while keeping your /root files">
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         <span class="btn-lbl">Restart</span>
       </button>
-      <button id="resetBtn" class="wide-only ghost-btn danger-btn" title="Discard saved session and start fresh">Reset</button>
+      <button id="resetBtn" class="wide-only ghost-btn danger-btn" title="Discard saved /root files and start fresh">Reset</button>
       <a id="aboutLink" class="wide-only nav-link" href="about.html">About</a>
       <button id="barMenuBtn" class="ghost-btn" aria-haspopup="true" aria-expanded="false" aria-label="More actions">⋮</button>
     </div>
 
     <div id="barMenu" role="menu" hidden>
       <button id="mNet" role="menuitem" data-feature="network">Internet (Fetch): Off</button>
+      <button id="mSave" role="menuitem">Save /root now</button>
       <button id="mUpload" role="menuitem" data-feature="upload">Upload to /mnt/host</button>
       <button id="mDownload" role="menuitem" data-feature="download">Download from /mnt/host</button>
       <button id="mPacks" role="menuitem" data-feature="packs">Tools &amp; offline cache</button>

@@ -43,13 +43,34 @@ function downloadLimitBytes() {
   return isMobile ? 30 * 1024 * 1024 : 300 * 1024 * 1024;
 }
 
+function findHostDirId(fs) {
+  if (!fs || !Array.isArray(fs.inodes) || !fs.inodes[0]) return 0;
+  if (typeof window !== "undefined" && window.Go9p && typeof window.Go9p.findHostDirId === "function") {
+    const id = window.Go9p.findHostDirId(fs);
+    if (id > 0) return id;
+  }
+  const root = fs.inodes[0];
+  if (root && root.direntries instanceof Map) {
+    const id = root.direntries.get("host");
+    if (typeof id === "number" && id > 0 && fs.inodes[id] && ((fs.inodes[id].mode & S_IFMT) === S_IFDIR)) {
+      return id;
+    }
+  }
+  return 0;
+}
+
+function hostMountPrefix(fs) {
+  return findHostDirId(fs) > 0 ? "/host/" : "/";
+}
+
 /**
- * List all regular files currently in v86's 9p host share (/mnt/host).
+ * List all regular files currently in v86's /mnt/host 9p share.
  * Pure traversal over fs.inodes (exported for unit testing).
  * Returns [{ path, name, size }] sorted alphabetically by path.
  */
 export function listHostFiles(fs) {
   if (!fs || !Array.isArray(fs.inodes) || !fs.inodes[0]) return [];
+  const startId = findHostDirId(fs);
   const results = [];
   const visited = new Set();
 
@@ -76,7 +97,7 @@ export function listHostFiles(fs) {
     }
   }
 
-  walk(0, "", 0);
+  walk(startId, "", 0);
   results.sort((a, b) => a.path.localeCompare(b.path));
   return results;
 }
@@ -102,7 +123,7 @@ export async function uploadFiles(fileList) {
       try {
         setPersistStatus(`Uploading ${safeName}…`, "");
         const data = new Uint8Array(await file.arrayBuffer());
-        await emu.create_file("/" + safeName, data);
+        await emu.create_file(hostMountPrefix(emu.fs9p) + safeName, data);
         setPersistStatus(
           `Uploaded ${safeName} -> ${UPLOAD_DIR}/${safeName} (temporary; cp to /root to keep).`,
           "ok"
@@ -131,7 +152,7 @@ export async function downloadHostFile(relPath, expectedSize, statusEl) {
   downloadInFlight = true;
   try {
     if (statusEl) { statusEl.textContent = `Reading ${relPath}…`; statusEl.className = ""; }
-    const data = await emu.read_file("/" + relPath);
+    const data = await emu.read_file(hostMountPrefix(emu.fs9p) + relPath);
     if (!data) throw new Error("file not found in /mnt/host");
     if (data.byteLength > limit) {
       const msg = `"${relPath}" is ${humanSize(data.byteLength)}, over the ${humanSize(limit)} limit.`;

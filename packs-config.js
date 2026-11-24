@@ -11,7 +11,7 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v34";
+const GL_VERSION = "v35";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
  * (e.g. virtio_console, virtio_net, memory_size, OS image) changes so incompatible
@@ -121,6 +121,7 @@ function glSetAssetBase(base) {
 const GL_SHELL_CACHE = `golinux-shell-${GL_VERSION}`;
 const GL_DATA_CACHE = `golinux-data-${GL_VERSION}`;   // snapshot + on-demand chunks
 const GL_PACK_CACHE = `golinux-pack-${GL_VERSION}`;   // opt-in chunk packs
+const GL_PENDING_STATE_CACHE = "golinux-pending-state"; // cross-browser SW unload save fallback
 
 /* Same-origin paths (shell). */
 const GL_SNAPSHOT_URL = "images/debian-state.bin.zst";

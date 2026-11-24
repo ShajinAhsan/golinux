@@ -72,6 +72,9 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
     const keep = new Set([GL_SHELL_CACHE, GL_DATA_CACHE, GL_PACK_CACHE]);
+    if (typeof GL_PENDING_STATE_CACHE === "string" && GL_PENDING_STATE_CACHE) {
+      keep.add(GL_PENDING_STATE_CACHE);
+    }
     if (IS_LOCAL_HOST) keep.add(GL_CONFIG_CACHE);
     const names = await caches.keys();
     await Promise.all(names.filter((n) => !keep.has(n)).map((n) => caches.delete(n)));
@@ -742,9 +745,229 @@ function drainToolWarmQueue() {
   }
 }
 
+/* ---------- persistent /root unload handoff (survives page refresh/close) ---------- */
+
+const PERSIST_DIR = "golinux";
+const PERSIST_ROOT_FILE = "root-fs.bin";
+const PERSIST_META_FILE = "root-meta.json";
+const PERSIST_PENDING_KEY = "/__golinux_pending_root__";
+const PERSIST_GZIP_THRESHOLD = 256 * 1024;
+const PERSIST_MAX_BYTES = 100 * 1024 * 1024;
+
+let pendingPersistChain = Promise.resolve();
+let persistResetGen = 0;
+let lastPersistResult = null;
+
+async function withPersistLock(fn) {
+  if (self.navigator && self.navigator.locks && self.navigator.locks.request) {
+    return self.navigator.locks.request("golinux-state", fn);
+  }
+  return fn();
+}
+
+async function gzipBytesSW(buf) {
+  if (typeof CompressionStream === "undefined") return null;
+  const cs = new CompressionStream("gzip");
+  return new Response(new Blob([buf]).stream().pipeThrough(cs)).arrayBuffer();
+}
+
+async function writeOpfsAtomicSW(dir, fileName, bytes) {
+  const tmpName = fileName + ".tmp";
+  const tmp = await dir.getFileHandle(tmpName, { create: true });
+  if (typeof tmp.createWritable !== "function" || typeof tmp.move !== "function") {
+    try { await dir.removeEntry(tmpName); } catch (_) {}
+    return false;
+  }
+  try {
+    const w = await tmp.createWritable();
+    try {
+      await w.write(new Blob([bytes]));
+      await w.close();
+    } catch (e) {
+      try { await w.abort(); } catch (_) {}
+      throw e;
+    }
+    try {
+      await tmp.move(dir, fileName);
+    } catch (moveErr) {
+      if (moveErr instanceof TypeError) {
+        await tmp.move(fileName);
+      } else {
+        throw moveErr;
+      }
+    }
+    return true;
+  } catch (e) {
+    const n = e && e.name;
+    if (n === "TypeError" || n === "NotSupportedError") {
+      try { await dir.removeEntry(tmpName); } catch (_) {}
+      return false;
+    }
+    throw e;
+  }
+}
+
+async function handlePersistSaveSW(payload, gen) {
+  if (gen !== persistResetGen) return { ok: false, aborted: true };
+  const raw = payload && payload.archive;
+  if (!(raw instanceof ArrayBuffer) || raw.byteLength < 12) {
+    return { ok: false, errorName: "InvalidStateError" };
+  }
+
+  let dataBuf = raw;
+  let encoding = "raw";
+  if (raw.byteLength > PERSIST_GZIP_THRESHOLD) {
+    try {
+      const gz = await gzipBytesSW(raw);
+      if (gz && gz.byteLength < raw.byteLength) {
+        dataBuf = gz;
+        encoding = "gzip";
+      }
+    } catch (_) { /* keep raw */ }
+  }
+
+  if (gen !== persistResetGen) return { ok: false, aborted: true };
+  if (dataBuf.byteLength > PERSIST_MAX_BYTES) {
+    return { ok: false, errorName: "SizeLimitError", bytes: dataBuf.byteLength };
+  }
+
+  const metaIn = (payload && payload.meta) || {};
+  const meta = {
+    format: "glfs",
+    version: 1,
+    encoding,
+    savedAt: typeof metaIn.savedAt === "number" ? metaIn.savedAt : Date.now(),
+    bytes: dataBuf.byteLength,
+    rawBytes: raw.byteLength,
+    fileCount: Number(metaIn.fileCount) || 0,
+    reason: String(metaIn.reason || "unload"),
+  };
+
+  const pendingCacheName = typeof GL_PENDING_STATE_CACHE === "string"
+    ? GL_PENDING_STATE_CACHE
+    : "golinux-pending-state";
+
+  return withPersistLock(async () => {
+    if (gen !== persistResetGen) return { ok: false, aborted: true };
+
+    // Primary path: atomic OPFS write (Chrome, Edge, modern Firefox).
+    let wroteOpfs = false;
+    try {
+      if (self.navigator && self.navigator.storage && self.navigator.storage.getDirectory) {
+        const root = await self.navigator.storage.getDirectory();
+        const dir = await root.getDirectoryHandle(PERSIST_DIR, { create: true });
+        const okData = await writeOpfsAtomicSW(dir, PERSIST_ROOT_FILE, dataBuf);
+        if (okData) {
+          const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
+          const okMeta = await writeOpfsAtomicSW(dir, PERSIST_META_FILE, metaBytes);
+          if (okMeta) {
+            wroteOpfs = true;
+            // Remove any older pending fallback entry now that OPFS is authoritative.
+            try {
+              const pc = await caches.open(pendingCacheName);
+              await pc.delete(PERSIST_PENDING_KEY);
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (e) {
+      if (e && (e.name === "QuotaExceededError" || e.name === "SecurityError")) {
+        return { ok: false, errorName: e.name, message: String(e.message || e) };
+      }
+      // Fall through to universal Cache API fallback (Safari / WebKit / older Firefox).
+    }
+
+    if (!wroteOpfs) {
+      try {
+        const pc = await caches.open(pendingCacheName);
+        await pc.put(
+          new Request(self.location.origin + PERSIST_PENDING_KEY, { method: "GET" }),
+          new Response(dataBuf, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/octet-stream",
+              "Content-Length": String(dataBuf.byteLength),
+              "X-GL-Format": "glfs",
+              "X-GL-Version": "1",
+              "X-GL-Encoding": encoding,
+              "X-GL-Saved-At": String(meta.savedAt),
+              "X-GL-Raw-Bytes": String(meta.rawBytes),
+              "X-GL-File-Count": String(meta.fileCount),
+              "X-GL-Reason": meta.reason,
+            },
+          })
+        );
+      } catch (e) {
+        return { ok: false, errorName: (e && e.name) || "Error", message: String((e && e.message) || e) };
+      }
+    }
+
+    return {
+      ok: true,
+      storage: wroteOpfs ? "opfs" : "cache",
+      bytes: meta.bytes,
+      fileCount: meta.fileCount,
+      savedAt: meta.savedAt,
+      reason: meta.reason,
+    };
+  });
+}
+
 self.addEventListener("message", (event) => {
   const data = event.data;
   if (!data || !data.type) return;
+
+  if (data.type === "persist-save") {
+    const gen = persistResetGen;
+    const src = event.source;
+    const job = pendingPersistChain
+      .catch(() => {})
+      .then(() => handlePersistSaveSW(data, gen))
+      .then((res) => {
+        lastPersistResult = res;
+        if (src && typeof src.postMessage === "function") {
+          try { src.postMessage({ type: "persist-saved", ...res }); } catch (_) {}
+        }
+        return res;
+      })
+      .catch((e) => {
+        const res = { ok: false, errorName: (e && e.name) || "Error", message: String((e && e.message) || e) };
+        lastPersistResult = res;
+        return res;
+      });
+    pendingPersistChain = job;
+    event.waitUntil(job);
+    return;
+  }
+
+  if (data.type === "persist-flush") {
+    const port = event.ports && event.ports[0];
+    const job = pendingPersistChain.catch(() => {}).then(() => {
+      if (port) port.postMessage({ ok: true, lastResult: lastPersistResult });
+    });
+    event.waitUntil(job);
+    return;
+  }
+
+  if (data.type === "persist-clear") {
+    persistResetGen++;
+    const port = event.ports && event.ports[0];
+    const pendingCacheName = typeof GL_PENDING_STATE_CACHE === "string"
+      ? GL_PENDING_STATE_CACHE
+      : "golinux-pending-state";
+    const job = pendingPersistChain
+      .catch(() => {})
+      .then(() => withPersistLock(async () => {
+        lastPersistResult = null;
+        try { await caches.delete(pendingCacheName); } catch (_) {}
+      }))
+      .then(() => {
+        if (port) port.postMessage({ ok: true });
+      });
+    pendingPersistChain = job;
+    event.waitUntil(job);
+    return;
+  }
 
   if (data.type === "get-throughput") {
     const bps = measuredThroughput();

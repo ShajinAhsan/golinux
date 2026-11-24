@@ -120,7 +120,14 @@ export function setupStatusChrome() {
 
   const updateReload = $("updateBannerReload");
   if (updateReload) {
-    updateReload.onclick = () => {
+    updateReload.onclick = async () => {
+      if (window.emulator && window.GoPersist && window.GoPersist.getOwner && window.GoPersist.getOwner() &&
+          window.GoPersist.isDirty && window.GoPersist.isDirty()) {
+        await Promise.race([
+          window.GoPersist.saveNow(window.emulator, "reload").catch(() => false),
+          new Promise((r) => setTimeout(r, 4000)),
+        ]);
+      }
       try { sessionStorage.removeItem("gl_reloaded_for"); } catch (e) {}
       location.reload();
     };

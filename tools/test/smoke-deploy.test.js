@@ -806,47 +806,70 @@ async function launchChrome(profileDir, port) {
     check(spyAfterDownload.serial0SendCalls === 0 && spyAfterDownload.injectedBytes.length === 0,
       "INV-1: Option A Download sends zero bytes to guest stdin (BUG-04)");
 
-    /* --- 6. Persistence across reload + INV-1 spy on restore --- */
-    console.log("\n== persistence & restore ==");
+    /* --- 6. Instant /root persistence across refresh + fresh shell on stuck ping --- */
+    console.log("\n== instant /root persistence, fresh shell after ping & INV-1 spy ==");
     await setUserTyping(cdp, true);
-    await runCmd(cdp, "echo SURVIVED_TEST > /root/marker.txt && cat /root/marker.txt", /SURVIVED_TEST/, 20000, "write marker");
+    await runCmd(
+      cdp,
+      `printf '%s\\n' '#include <stdio.h>' 'int main(){ puts("PATTERN_RELOAD_OK"); return 0; }' > /root/pattern.c && gcc /root/pattern.c -o /root/pattern && /root/pattern && echo SURVIVED_TEST > /root/marker.txt && cat /root/marker.txt`,
+      /\nPATTERN_RELOAD_OK\nSURVIVED_TEST\n/,
+      25000,
+      "compile pattern.c + write marker"
+    );
+    // Start a blocking command (ping 1.2.3.4) WITHOUT pressing Ctrl+C and WITHOUT
+    // calling GoPersist.saveNow() — then immediately reload the page!
+    await focusTerm(cdp);
+    await typeText(cdp, "ping 1.2.3.4");
+    await pressEnter(cdp);
+    await waitScreen(cdp, /PING 1\.2\.3\.4/, 10000, "blocking ping started");
     await setUserTyping(cdp, false);
-    await sleep(400);
 
-    const savedObj = JSON.parse((await cdp.send("Runtime.evaluate", {
-      expression: `(async () => {
-        const ok = await window.GoPersist.saveNow(window.emulator, "manual");
-        const meta = await window.GoPersist.readMeta();
-        return JSON.stringify({ ok, meta, expectedSchema: typeof GL_STATE_SCHEMA === "number" ? GL_STATE_SCHEMA : 4 });
-      })()`,
-      awaitPromise: true, returnByValue: true,
-    })).result.value);
-    check(savedObj.ok && savedObj.meta && savedObj.meta.buildId === buildId && savedObj.meta.schema === savedObj.expectedSchema,
-      `saved state stamped with buildId and schema=${savedObj.expectedSchema}`);
-
+    // Immediate browser refresh (NO manual saveNow(), NO Ctrl+C, NO 30s wait!)
     await cdp.send("Page.reload", { ignoreCache: false });
-    await waitScreen(cdp, /\[session restored\][\s\S]*root@golinux:~#/, 60000, "restored banner + redrawn prompt");
+    await waitScreen(cdp, /saved \/root restored[\s\S]*root@golinux:~#/, 60000, "fresh shell + restored /root banner");
     await sleep(500);
     const spyRestore = JSON.parse((await cdp.send("Runtime.evaluate", {
       expression: `JSON.stringify(window.__stdinSpy)`, returnByValue: true,
     })).result.value);
     check(spyRestore.serial0SendCalls === 0 && spyRestore.injectedBytes.length === 0,
-      `INV-1: zero non-user bytes sent on session restore`);
+      `INV-1: zero non-user bytes sent on /root restore`);
 
+    const savedMeta = JSON.parse((await cdp.send("Runtime.evaluate", {
+      expression: `(async () => JSON.stringify(await window.GoPersist.readMeta()))()`,
+      awaitPromise: true, returnByValue: true,
+    })).result.value);
+    check(savedMeta && savedMeta.format === "glfs" && savedMeta.version === 1 && savedMeta.fileCount >= 2,
+      `portable /root archive persisted automatically (${JSON.stringify(savedMeta)})`);
+
+    // Must wake at a fresh, responsive prompt (NOT frozen inside ping!) with
+    // both /root/marker.txt and compiled ./pattern intact!
     await setUserTyping(cdp, true);
-    const afterReload = await runCmd(cdp, "cat /root/marker.txt", /SURVIVED_TEST|No such file/, 20000, "marker after reload");
+    const afterReload = await runCmd(
+      cdp,
+      "cat /root/marker.txt && /root/pattern && echo FRESH_SHELL_OK",
+      /FRESH_SHELL_OK[\s\S]*FRESH_SHELL_OK|No such file/,
+      20000,
+      "verify marker, ./pattern, and fresh shell after reload"
+    );
     await setUserTyping(cdp, false);
-    check(/SURVIVED_TEST/.test(afterReload), "/root/marker.txt survived reload");
+    check(/SURVIVED_TEST/.test(afterReload), "/root/marker.txt survived immediate refresh without manual saveNow");
+    check(/PATTERN_RELOAD_OK/.test(afterReload), "compiled /root/pattern (+x ELF) survived immediate refresh and executed");
+    check(!/ping statistics/.test(afterReload), "reloaded tab started fresh shell instead of holding frozen ping process");
 
-    /* --- 6. Safe Restart button (BUG-22) --- */
+    /* --- 6b. Safe Restart button saves unsaved /root files & boots fresh shell (BUG-22) --- */
     console.log("\n== safe Restart button ==");
+    await setUserTyping(cdp, true);
+    await runCmd(cdp, "echo BEFORE_RESTART > /root/restart_keep.txt && cat /root/restart_keep.txt", /BEFORE_RESTART/, 20000, "write file right before Restart");
+    await setUserTyping(cdp, false);
+    // Immediately click Restart (no manual saveNow!)
     await cdp.send("Runtime.evaluate", { expression: `document.getElementById("restart").click()` });
     await sleep(1500);
-    await waitScreen(cdp, /\[session restored\][\s\S]*root@golinux:~#/, 30000, "prompt after Restart");
+    await waitScreen(cdp, /saved \/root restored[\s\S]*root@golinux:~#/, 30000, "prompt after Restart");
     await setUserTyping(cdp, true);
-    const afterRestart = await runCmd(cdp, "echo RESTART_ALIVE", /RESTART_ALIVE[\s\S]*RESTART_ALIVE/, 20000, "after Restart");
+    const afterRestart = await runCmd(cdp, "cat /root/restart_keep.txt && echo RESTART_ALIVE", /RESTART_ALIVE[\s\S]*RESTART_ALIVE/, 20000, "after Restart");
     await setUserTyping(cdp, false);
-    check(/RESTART_ALIVE/.test(afterRestart), "Restart button boots working shell (never hangs SeaBIOS, BUG-22)");
+    check(/BEFORE_RESTART/.test(afterRestart) && /RESTART_ALIVE/.test(afterRestart),
+      "Restart button preserved unsaved /root file and booted fresh working shell (BUG-22)");
 
     /* --- 7. Safe Reset button (BUG-15 + deep cache/SW refresh) --- */
     console.log("\n== safe Reset button ==");
@@ -930,10 +953,19 @@ async function launchChrome(profileDir, port) {
       awaitPromise: true,
     });
     // Reload offline: MUST reject mismatched buildId even when offline!
+    await cdp.send("Runtime.evaluate", { expression: `window.__beforeOfflineReload = true;` });
     await cdp.send("Network.emulateNetworkConditions", {
       offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
     });
     await cdp.send("Page.reload", { ignoreCache: false });
+    for (let i = 0; i < 100; i++) {
+      const committed = (await cdp.send("Runtime.evaluate", {
+        expression: `window.__beforeOfflineReload !== true && typeof window.__bootMs === "number"`,
+        returnByValue: true,
+      })).result.value;
+      if (committed) break;
+      await sleep(150);
+    }
     await waitScreen(cdp, /root@golinux:~#/, 60000, "offline boot with stale state");
     const usedStaleOffline = (await cdp.send("Runtime.evaluate", {
       expression: `window.__usedUserState === true`, returnByValue: true,

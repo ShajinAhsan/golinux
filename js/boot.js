@@ -366,31 +366,28 @@ export async function bootMachine() {
 
   const forcedOff = new URLSearchParams(location.search).has("nosnapshot");
 
-  let userState = null;
+  // Always boot a fresh Alpine Linux instance from the shipped snapshot so a
+  // previously running command (e.g. ping, sleep, infinite loop) never freezes
+  // the terminal on reopen. Saved /root files are restored cleanly into 9p.
+  let savedRoot = null;
   if (!forcedOff) {
-    setLoading("Restoring your session", "Loading saved machine state from this browser.");
-    setStatus("restoring…");
-    userState = await window.GoPersist.loadUserState();
-    if (!userState) {
-      setLoading("Starting a fresh machine", "Loading the shipped Alpine Linux snapshot.");
-    }
+    setLoading("Starting GoLinux", "Checking saved /root files…");
+    setStatus("loading…");
+    savedRoot = await window.GoPersist.loadUserState();
   }
 
   const haveSnapshot = !forcedOff && (await snapshotAvailable(GL_SNAPSHOT_URL));
-  if (!userState) setStatus(haveSnapshot ? "restoring…" : "booting…");
+  setStatus(haveSnapshot ? "restoring…" : "booting…");
 
   let initialState = null;
-  if (userState) {
-    initialState = { buffer: userState };
-    window.__usedUserState = true;
-  } else if (haveSnapshot) {
-    window.__usedUserState = false;
+  window.__usedUserState = !!savedRoot;
+  if (haveSnapshot) {
     const cached = await snapshotIsCached();
     if (!cached) {
       setLoading("Downloading the machine", "A lightweight ~9 MB snapshot the first time; cached afterwards.");
       showProgress(0, 0);
     } else {
-      setLoading("Starting…", "Restoring the shipped snapshot.");
+      setLoading("Starting…", savedRoot ? "Starting fresh shell & restoring /root files." : "Restoring the shipped snapshot.");
     }
 
     try {
@@ -481,25 +478,34 @@ export async function bootMachine() {
     window.__bootMs = Math.round(performance.now() - bootStart);
     clearLoading();
 
-    // Hook unified keybar + native keyboard modifier pipeline & dirty tracking.
+    // Restore saved /root files into 9p BEFORE attaching mutation watchers
+    // so restored files do not spuriously re-trigger an autosave.
+    let restoredCount = 0;
+    if (savedRoot) {
+      try {
+        restoredCount = window.GoPersist.restoreRootFiles(emu, savedRoot);
+      } catch (e) {
+        console.warn("failed to restore saved /root files:", e);
+      }
+    }
+
+    // Hook unified keybar + native keyboard modifier pipeline.
     attachKeyboardInterceptor(emu);
 
-    // Attach autosave lifecycle (only active if this tab owns persistence lock).
+    // Attach instant /root fs9p mutation watcher & unload handoff.
     window.GoPersist.attach(emu);
 
     // Display local banner ONLY via xterm.write (zero bytes sent to guest!).
     const term = currentTerminal();
     if (term && initialState) {
-      if (userState) {
-        term.write("\x1b[2m[session restored]\x1b[0m\r\n");
-      } else {
-        term.write(FRESH_MOTD + "\r\n\x1b[1;32mroot@golinux\x1b[0m:\x1b[1;34m~\x1b[0m# ");
-      }
+      const restoreNote = savedRoot
+        ? `  \x1b[32m[saved /root restored · ${restoredCount} file${restoredCount === 1 ? "" : "s"}]\x1b[0m\r\n`
+        : "";
+      term.write(FRESH_MOTD + restoreNote + "\r\n\x1b[1;32mroot@golinux\x1b[0m:\x1b[1;34m~\x1b[0m# ");
     }
 
     // Resize xterm.js and send out-of-band virtio-console0-resize (zero stdin).
-    // On user-state restore, nudge SIGWINCH so bash/nano redraws its real prompt.
-    fitSoon({ nudgeRedraw: !!userState });
+    fitSoon({ nudgeRedraw: false });
 
     // Signal idle pre-warmer that the VM is live.
     try { window.dispatchEvent(new CustomEvent("gl-emulator-ready")); } catch (_) {}
@@ -515,8 +521,9 @@ export async function bootMachine() {
 }
 
 /**
- * Safe restart: cleanly destroys the running V86 instance and boots fresh from
- * saved/shipped snapshot (never calls emulator.restart() into SeaBIOS).
+ * Safe restart: flushes any unsaved /root files, cleanly destroys the running
+ * V86 instance, and boots a fresh Alpine Linux instance from the shipped
+ * snapshot with /root files intact (never calls emulator.restart() into SeaBIOS).
  */
 export async function restartMachine() {
   if (restarting) return;
@@ -524,6 +531,17 @@ export async function restartMachine() {
   const btn = document.getElementById("restart");
   if (btn) btn.disabled = true;
   try {
+    if (window.emulator && window.GoPersist && window.GoPersist.getOwner && window.GoPersist.getOwner()) {
+      const needSave = (window.GoPersist.isDirty && window.GoPersist.isDirty()) ||
+                       (window.GoPersist.isSaveInFlight && window.GoPersist.isSaveInFlight());
+      if (needSave) {
+        setStatus("saving…");
+        await Promise.race([
+          window.GoPersist.saveNow(window.emulator, "restart").catch(() => false),
+          new Promise((r) => setTimeout(r, 5000)),
+        ]);
+      }
+    }
     setStatus("restarting…");
     if (activeNetAdapter) {
       try { activeNetAdapter.destroy(); } catch (e) {}

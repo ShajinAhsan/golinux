@@ -67,6 +67,7 @@ function setupBarMenu() {
     open(false);
     const target = {
       mNet: "netBtn",
+      mSave: "saveBtn",
       mPacks: "openPacks",
       mUpload: "uploadBtn",
       mDownload: "downloadBtn",
@@ -88,6 +89,13 @@ function wireServiceWorkerMessages(toolHooks, packsHooks) {
   navigator.serviceWorker.addEventListener("message", (e) => {
     const data = e.data;
     if (!data || !data.type) return;
+
+    if (data.type === "persist-saved") {
+      if (window.GoPersist && window.GoPersist.handleSwSaved) {
+        window.GoPersist.handleSwSaved(data);
+      }
+      return;
+    }
 
     if (data.type === "disk-activity") {
       // A real network chunk fetch succeeded, so connectivity is back.
