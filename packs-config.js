@@ -11,7 +11,7 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v29";
+const GL_VERSION = "v30";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
  * (e.g. virtio_console, virtio_net, memory_size, OS image) changes so incompatible
@@ -26,10 +26,10 @@ const GL_DISK_SIZE = 1 * 1024 * 1024 * 1024;
 /* Launch feature flags. Unstable/non-core features stay off until their tests
  * and invariants pass (see docs/stabilization/SCOPE.md). */
 const GL_FEATURES = Object.freeze({
-  packs: false,
+  packs: true,           // bundle-native Tools & Offline Cache drawer
   diskIndicator: true,   // compact floating toast (zero terminal layout shift)
-  toolProgress: false,
-  prefetch: false,
+  toolProgress: true,    // real-time tool identification, progress bar, speed & ETA
+  prefetch: true,        // polite yield-immediately background tool pre-warmer
   upload: true,          // 9p create_file() into /mnt/host (zero stdin injection)
   download: true,        // /mnt/host file browser using 9p read_file() (zero stdin injection)
   restartButton: true,   // safe snapshot restart (re-instantiates V86; never SeaBIOS reboot)
@@ -37,7 +37,10 @@ const GL_FEATURES = Object.freeze({
 });
 
 /* Authoritative app-shell file list, shared by sw.js (precache) and
- * tools/deploy/build-pages.sh (staging). */
+ * tools/deploy/build-pages.sh (staging). Cold-fallback-only files
+ * (debian-bzImage, debian-initrd, v86-fallback.wasm = ~15.3 MB) are omitted
+ * from install precache so slow links boot ~85% faster; they still cache on
+ * demand in GL_DATA_CACHE if ?nosnapshot is ever used. */
 const GL_SHELL_FILES = Object.freeze([
   "./",
   "index.html",
@@ -61,15 +64,13 @@ const GL_SHELL_FILES = Object.freeze([
   "js/packs-ui.js",
   "js/transfer.js",
   "js/tool-progress.js",
+  "js/prefetch.js",
   "assets/v86/libv86.js",
   "assets/v86/v86.wasm",
-  "assets/v86/v86-fallback.wasm",
   "assets/xterm/xterm.js",
   "assets/xterm/xterm.css",
   "assets/bios/seabios.bin",
   "assets/bios/vgabios.bin",
-  "images/debian-bzImage",
-  "images/debian-initrd",
   "assets/empty-chunk.zst",
   "chunks-precache.json",
   "bundles.json",
@@ -168,8 +169,12 @@ function glIsChunkUrl(url) {
   }
 }
 
-/* ---------- prefetch tuning (inactive while GL_FEATURES.prefetch === false) ---------- */
+/* ---------- adaptive bandwidth & idle pre-warm tuning ---------- */
 const GL_PREFETCH = GL_FEATURES.prefetch;
-const GL_PREFETCH_MIN_BPS = 1.5 * 1024 * 1024;
-const GL_PREFETCH_CONCURRENCY = 4;
-const GL_PREFETCH_CAP_BYTES = 16 * 1024 * 1024;
+const GL_SLOW_LINK_BPS = 300 * 1024;           // < ~2.4 Mbps -> exact Range chunk fetching
+const GL_SMALL_BUNDLE_BYTES = 96 * 1024;       // bundles <= 96 KB always fetch whole
+const GL_PREFETCH_MIN_BPS = 1.5 * 1024 * 1024; // legacy fast-link threshold (kept for compat)
+const GL_PREFETCH_CONCURRENCY = 2;
+const GL_PREFETCH_BUDGET_SLOW = 6 * 1024 * 1024;  // 6 MB auto-warm cap on slow links
+const GL_PREFETCH_BUDGET_FAST = 16 * 1024 * 1024; // 16 MB auto-warm cap on fast links
+const GL_PREFETCH_CAP_BYTES = GL_PREFETCH_BUDGET_FAST;

@@ -62,9 +62,14 @@ function serve(root, opts = {}) {
 
     if (opts.assetOrigin) {
       res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET, HEAD");
+      res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Range, If-None-Match, If-Modified-Since");
       res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range, ETag");
+      if (req.method === "OPTIONS") {
+        res.setHeader("Access-Control-Max-Age", "86400");
+        log[log.length - 1].status = 204;
+        return res.writeHead(204).end();
+      }
       if (!/^(images\/debian-chunks\/|bundles\/|packs\/)/.test(rel)) {
         log[log.length - 1].status = 404;
         return res.writeHead(404).end("not in bucket");
@@ -84,13 +89,29 @@ function serve(root, opts = {}) {
       log[log.length - 1].status = 404;
       return res.writeHead(404).end("not found");
     }
-    const body = fs.readFileSync(full);
-    log[log.length - 1].status = 200;
-    res.writeHead(200, {
+    const fullBody = fs.readFileSync(full);
+    let body = fullBody;
+    let status = 200;
+    const headers = {
       "Content-Type": MIME[path.extname(full).toLowerCase()] || "application/octet-stream",
-      "Content-Length": body.length,
+      "Accept-Ranges": "bytes",
       "Cache-Control": opts.assetOrigin ? "public, max-age=0, must-revalidate" : "no-cache",
-    });
+    };
+    const rangeHdr = req.headers.range;
+    if (rangeHdr && /^bytes=\d+-\d*$/.test(rangeHdr)) {
+      const [sStr, eStr] = rangeHdr.slice(6).split("-");
+      const start = Number(sStr);
+      const end = eStr ? Math.min(Number(eStr), fullBody.length - 1) : (fullBody.length - 1);
+      if (start >= 0 && start <= end && end < fullBody.length) {
+        status = 206;
+        body = fullBody.subarray(start, end + 1);
+        headers["Content-Range"] = `bytes ${start}-${end}/${fullBody.length}`;
+      }
+    }
+    headers["Content-Length"] = body.length;
+    log[log.length - 1].status = status;
+    log[log.length - 1].bytes = body.length;
+    res.writeHead(status, headers);
     if (req.method === "HEAD") return res.end();
     const t = opts.throttle;
     if (!t || (!/\/debian-chunks\//.test(rel) && !/^bundles\//.test(rel))) return res.end(body);
@@ -962,21 +983,54 @@ async function launchChrome(profileDir, port) {
     check(/ALIVE_AFTER_WIPE/.test(afterWipe),
       "clear, ls, and uncached bundle tool (figlet) keep working without freezing after clearing site data/cache mid-session");
 
+    /* --- 9c. Slow-link (500 Kbps) adaptive HTTP Range fetch --- */
+    console.log("\n== slow-link (500 Kbps) adaptive Range mode ==");
+    await cdp.send("Runtime.evaluate", {
+      expression: `(async () => {
+        localStorage.setItem("golinux.bwMode", "slow");
+        localStorage.setItem("golinux.autowarm", "off");
+        await caches.delete(GL_DATA_CACHE);
+      })()`,
+      awaitPromise: true,
+    });
+    await cdp.send("Page.reload", { ignoreCache: false });
+    await waitScreen(cdp, /root@golinux:~#/, 60000, "fresh boot in slow-link mode");
+    const logIdxBeforeSlow = assetLog.length;
+    await setUserTyping(cdp, true);
+    const slowOut = await runCmd(
+      cdp,
+      "tmux -V && echo SLOW_TMUX_OK",
+      /^SLOW_TMUX_OK$/m,
+      30000,
+      "slow-link tmux over Range requests"
+    );
+    await setUserTyping(cdp, false);
+    const slowReqs = assetLog.slice(logIdxBeforeSlow).filter((r) => r.method === "GET" && /\/bundles\/[^/]+\/b-[^/]+\.pack$/.test(r.path));
+    const slow206 = slowReqs.filter((r) => r.status === 206);
+    check(/tmux[\s\S]*SLOW_TMUX_OK/.test(slowOut), "slow-link mode executes cold tool (tmux) accurately");
+    check(slow206.length > 0, `slow-link mode fetched exact 206 byte ranges (got ${slow206.length} x 206 out of ${slowReqs.length} GETs)`);
+    const slowTotalBytes = slow206.reduce((s, r) => s + (r.bytes || 0), 0);
+    check(slowTotalBytes < 1200 * 1024, `slow-link tmux downloaded compact range bytes (${Math.round(slowTotalBytes / 1024)} KB < 1200 KB vs 2325 KB full bundles)`);
+    await cdp.send("Runtime.evaluate", {
+      expression: `localStorage.removeItem("golinux.bwMode"); localStorage.removeItem("golinux.autowarm");`,
+    });
+
     /* --- 10. Network assertions --- */
     console.log("\n== network assertions ==");
-    const chunkHits = (log) => log.filter((r) => /\/debian-chunks\/(?:[^/]+\/)?chunk-\d+-\d+\.zst$/.test(r.path));
-    const bundleHits = (log) => log.filter((r) => /\/bundles\/[^/]+\/b-[^/]+\.pack$/.test(r.path));
+    const chunkHits = (log) => log.filter((r) => r.method === "GET" && /\/debian-chunks\/(?:[^/]+\/)?chunk-\d+-\d+\.zst$/.test(r.path));
+    const bundleHits = (log) => log.filter((r) => r.method === "GET" && /\/bundles\/[^/]+\/b-[^/]+\.pack$/.test(r.path));
     const assetChunks = chunkHits(assetLog);
     const appChunks = chunkHits(appLog);
     const assetBundles = bundleHits(assetLog);
     const appBundles = bundleHits(appLog);
-    check(assetBundles.length > 0, `guest fetched ${assetBundles.length} hybrid .pack bundles from asset origin`);
-    check(assetBundles.length < 60, `hybrid bundling kept total R2 bundle fetches compact (${assetBundles.length} < 60)`);
+    const fastBundleHits = assetBundles.filter((r) => r.status === 200);
+    check(assetBundles.length > 0, `guest fetched ${assetBundles.length} hybrid .pack requests from asset origin (${fastBundleHits.length} x 200, ${assetBundles.length - fastBundleHits.length} x 206)`);
+    check(fastBundleHits.length < 60, `hybrid bundling kept fast-mode R2 bundle fetches compact (${fastBundleHits.length} < 60)`);
     check(assetChunks.length === 0, `zero individual .zst chunk fetches or 404s hit asset origin (got ${assetChunks.length})`);
     check(appChunks.length === 0 && appBundles.length === 0, "zero chunk/bundle requests reached app origin");
     const bundlePrefix = `/bundles/${buildId}/`;
-    check(assetBundles.every((r) => r.path.startsWith(bundlePrefix) && r.status === 200),
-      `every bundle path carries buildId ${buildId} and returned 200`);
+    check(assetBundles.every((r) => r.path.startsWith(bundlePrefix) && (r.status === 200 || r.status === 206)),
+      `every bundle path carries buildId ${buildId} and returned 200 or 206`);
   } catch (e) {
     bad(e.stack || e.message);
   } finally {

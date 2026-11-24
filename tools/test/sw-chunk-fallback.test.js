@@ -131,6 +131,7 @@ function loadWorker({ fetchImpl, caches: givenCaches, origin = PROD_ORIGIN }) {
     origin: u.origin,
     dispatchFetch,
     sendMessage,
+    handlers,
     messages,
     caches: caches_,
     GL,
@@ -472,6 +473,119 @@ async function testHybridBundleFetchDedupeAndOffline() {
     "(wipe) empty chunk recovers cleanly when Cache Storage was deleted mid-session");
 }
 
+async function testAdaptiveRangeStreamingAndPreemption() {
+  // Large bundle (> 96 KB) with two chunks: Range mode should fetch ONLY the requested slice!
+  const chunk0 = Buffer.alloc(60 * 1024, 0x41); // 60 KB
+  const chunk1 = Buffer.alloc(60 * 1024, 0x42); // 60 KB
+  const bigBundle = Buffer.concat([chunk0, chunk1]); // 120 KB (> 96 KB small-bundle cutoff)
+  const tinyBundle = Buffer.alloc(40 * 1024, 0x43);  // 40 KB (<= 96 KB)
+  const manifest = {
+    v: 1,
+    buildId: "test",
+    chunkSize: 131072,
+    files: ["b-big-000.pack", "b-tiny-000.pack"],
+    entries: [
+      [0, 0, 0, chunk0.length],
+      [1, 0, chunk0.length, chunk1.length],
+      [8, 1, 0, tinyBundle.length],
+    ],
+  };
+
+  const rangeHeaders = [];
+  let idleAborted = false;
+  const d = loadWorker({
+    fetchImpl: async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("chunks-precache.json")) return new Response(JSON.stringify(REAL_LIST), { status: 200 });
+      if (url.endsWith("bundles.json")) return new Response(JSON.stringify(manifest), { status: 200 });
+      const rng = init && init.headers && (init.headers.Range || init.headers.range);
+      rangeHeaders.push({ url, rng: rng || null });
+
+      // Simulate slow link (or abortable idle fetch)
+      if (init && init.signal) {
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(resolve, 120);
+          init.signal.addEventListener("abort", () => {
+            clearTimeout(t);
+            idleAborted = true;
+            const err = new Error("Aborted");
+            err.name = "AbortError";
+            reject(err);
+          }, { once: true });
+        });
+      }
+
+      const payload = url.endsWith("b-tiny-000.pack") ? tinyBundle : bigBundle;
+      if (rng && rng.startsWith("bytes=")) {
+        const [s, e] = rng.slice(6).split("-").map(Number);
+        const slice = payload.subarray(s, e + 1);
+        return new Response(slice, {
+          status: 206,
+          headers: {
+            "Content-Length": String(slice.length),
+            "Content-Range": `bytes ${s}-${e}/${payload.length}`,
+          },
+        });
+      }
+      return new Response(payload, {
+        status: 200,
+        headers: { "Content-Length": String(payload.length) },
+      });
+    },
+  });
+  await seedEmptyTemplate(d);
+
+  // Seed a 500 Kbps (~62.5 KB/s) link via report-throughput -> activates slow Range mode!
+  d.sendMessage({ type: "report-throughput", bps: 62500 });
+  const r0 = await d.dispatchFetch(chunkRequest(REAL_LIST[0]));
+  const buf0 = Buffer.from(await r0.arrayBuffer());
+  check(r0.status === 200 && buf0.length === chunk0.length && buf0[0] === 0x41,
+    "(slow-range) 500 Kbps link fetches exact 206 byte range for large bundle");
+  check(rangeHeaders[0] && rangeHeaders[0].rng === `bytes=0-${chunk0.length - 1}`,
+    `(slow-range) sent exact Range header (got ${rangeHeaders[0] && rangeHeaders[0].rng})`);
+  check(d.messages.some((m) => m.type === "disk-activity" && m.mode === "slow" && Array.isArray(m.activeNames)),
+    "(slow-range) disk-activity broadcasts mode='slow' and activeNames");
+
+  // Tiny bundle (<= 96 KB) fetches whole even in slow mode (avoids preflight overhead)
+  rangeHeaders.length = 0;
+  const rTiny = await d.dispatchFetch(chunkRequest(REAL_LIST[2]));
+  const bufTiny = Buffer.from(await rTiny.arrayBuffer());
+  check(rTiny.status === 200 && bufTiny.length === tinyBundle.length && rangeHeaders[0] && rangeHeaders[0].rng === null,
+    "(slow-range) small bundle (<= 96 KB) fetches whole without Range header");
+
+  // Idle warm-up is aborted immediately when a foreground chunk read arrives!
+  const idleDone = new Promise((resolve) => {
+    const src = { postMessage: (m) => { if (m && m.type === "idle-warm-result") resolve(m); } };
+    for (const fn of d.handlers.message || []) {
+      fn({ data: { type: "warm-chunks", priority: "idle", names: [REAL_LIST[1]] }, source: src, waitUntil: () => {} });
+    }
+  });
+  await new Promise((r) => setTimeout(r, 15));
+  // Trigger foreground read while idle warm is in flight
+  const rFg = await d.dispatchFetch(chunkRequest(REAL_LIST[1]));
+  const idleRes = await idleDone;
+  check(idleAborted && idleRes && idleRes.aborted === true,
+    "(preempt) foreground disk read immediately aborts in-flight idle background warm-up");
+  check(rFg.status === 200 && (await rFg.arrayBuffer()).byteLength === chunk1.length,
+    "(preempt) foreground chunk read succeeds cleanly after aborting idle warm-up");
+
+  // Graceful 200 OK fallback when upstream ignores Range header
+  const d200 = loadWorker({
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("chunks-precache.json")) return new Response(JSON.stringify(REAL_LIST), { status: 200 });
+      if (url.endsWith("bundles.json")) return new Response(JSON.stringify(manifest), { status: 200 });
+      return new Response(bigBundle, { status: 200, headers: { "Content-Length": String(bigBundle.length) } });
+    },
+  });
+  await seedEmptyTemplate(d200);
+  d200.sendMessage({ type: "set-bandwidth-mode", mode: "slow" });
+  const rFallback = await d200.dispatchFetch(chunkRequest(REAL_LIST[1]));
+  const bufFb = Buffer.from(await rFallback.arrayBuffer());
+  check(rFallback.status === 200 && bufFb.length === chunk1.length && bufFb[0] === 0x42,
+    "(slow-range) gracefully unpacks 200 OK if upstream ignores Range header");
+}
+
 function testPageMessageContract() {
   const mainJs = fs.readFileSync(path.join(ROOT, "js/main.js"), "utf8");
   check(/data\.type === "chunk-missing-real"/.test(mainJs), "(page) js/main.js handles chunk-missing-real");
@@ -492,6 +606,7 @@ function testPageMessageContract() {
     testPackListAndPackQueryBypass,
     testDiskActivityAndThroughput,
     testHybridBundleFetchDedupeAndOffline,
+    testAdaptiveRangeStreamingAndPreemption,
     testPageMessageContract,
   ];
   for (const t of tests) {

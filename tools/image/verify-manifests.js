@@ -271,7 +271,7 @@ if (fs.existsSync(INSTALL_SH)) {
 const RUNTIME_CHECK = [
   "index.html", "terminal.html", "worker.js", "sw.js", "persist.js", "persist-9p.js", "packs.js",
   "js/landing.js", "js/main.js", "js/status.js", "js/boot.js", "js/chunk-fallback.js", "js/terminal.js",
-  "js/persist-ui.js", "js/packs-ui.js", "js/transfer.js", "js/tool-progress.js",
+  "js/persist-ui.js", "js/packs-ui.js", "js/transfer.js", "js/tool-progress.js", "js/prefetch.js",
 ];
 for (const rel of RUNTIME_CHECK) {
   const p = path.join(ROOT, rel);

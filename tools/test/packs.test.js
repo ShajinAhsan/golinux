@@ -101,19 +101,20 @@ function loadPacks({ fetchImpl, caches, locks, bus }) {
   const GL_CHUNK_PATH = "images/debian-chunks/" + BUILD_ID + "/";
   const glPackUrl = (f) => ORIGIN + "/packs/" + BUILD_ID + "/" + f;
   const glChunkUrl = (n) => ORIGIN + "/" + GL_CHUNK_PATH + n;
+  const glBundleUrl = (f) => ORIGIN + "/bundles/" + BUILD_ID + "/" + f;
   const bc = bus || makeBroadcastBus();
 
   const runner = new Function(
     "window", "location", "caches", "fetch", "console",
-    "GL_CHUNK_PATH", "glPackUrl", "glChunkUrl", "BroadcastChannel", "GL_PACK_CACHE",
+    "GL_CHUNK_PATH", "glPackUrl", "glChunkUrl", "glBundleUrl", "BroadcastChannel", "GL_PACK_CACHE", "GL_DATA_CACHE", "GL_SMALL_BUNDLE_BYTES",
     "navigator", "confirm", "localStorage",
     src + "\nreturn window.GoPacks;"
   );
   return runner(
     win, location, caches, fetchImpl,
     { log() {}, warn() {}, error() {} },
-    GL_CHUNK_PATH, glPackUrl, glChunkUrl,
-    bc.BroadcastChannel, PACK_CACHE, { locks }, () => true,
+    GL_CHUNK_PATH, glPackUrl, glChunkUrl, glBundleUrl,
+    bc.BroadcastChannel, PACK_CACHE, DATA_CACHE, 96 * 1024, { locks }, () => true,
     { getItem: () => null, setItem: () => {} }
   );
 }
@@ -270,6 +271,45 @@ async function testLockContention() {
   check(res && res.refused, "cross-tab lock refuses second job");
 }
 
+async function testBundleNativeInstallTool() {
+  const c0 = Buffer.alloc(60 * 1024, 0x31);
+  const c1 = Buffer.alloc(60 * 1024, 0x32);
+  const packBuf = Buffer.concat([c0, c1]);
+  const bJson = {
+    v: 1,
+    buildId: BUILD_ID,
+    chunkSize: 131072,
+    files: ["b-py-000.pack"],
+    entries: [
+      [0, 0, 0, c0.length],
+      [1, 0, c0.length, c1.length],
+    ],
+  };
+  const rangeSeen = [];
+  const fetchImpl = async (url, init) => {
+    const s = String(url);
+    if (s.endsWith("bundles.json")) return new Response(JSON.stringify(bJson), { status: 200 });
+    if (s.includes("b-py-000.pack")) {
+      const rng = init && init.headers && init.headers.Range;
+      rangeSeen.push(rng || null);
+      if (rng && rng.startsWith("bytes=")) {
+        const [a, b] = rng.slice(6).split("-").map(Number);
+        return new Response(packBuf.subarray(a, b + 1), { status: 206 });
+      }
+      return new Response(packBuf, { status: 200 });
+    }
+    return new Response("", { status: 404 });
+  };
+  const { caches, packs } = newEnv({ fetchImpl });
+  const res = await packs.installTool("python3", ["chunk-0-131072.zst"]);
+  check(res && res.complete === true, "installTool completes cleanly via bundles.json");
+  check(rangeSeen.length === 1 && rangeSeen[0] === `bytes=0-${c0.length - 1}`,
+    "installTool fetches exact Range slice when subset of bundle is requested");
+  const data = await caches.open(DATA_CACHE);
+  check(!!(await data.match(keyFor("chunk-0-131072.zst"))),
+    "installTool stores preloaded chunk into GL_DATA_CACHE");
+}
+
 (async () => {
   const tests = [
     testRemoveProtection,
@@ -279,6 +319,7 @@ async function testLockContention() {
     testPackFetchesUseGlPackBypassAndIdempotent,
     testUseMinimalKeepsDataCache,
     testLockContention,
+    testBundleNativeInstallTool,
   ];
   for (const t of tests) {
     try { await t(); }

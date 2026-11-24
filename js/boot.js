@@ -9,6 +9,7 @@
 import {
   clearLoading,
   hideProgress,
+  noteObservedNetwork,
   setLoading,
   setStatus,
   showFatal,
@@ -38,6 +39,31 @@ function pushAssetBase() {
     navigator.serviceWorker.controller.postMessage({
       type: "set-asset-base",
       base: GL_ASSET_BASE,
+    });
+  }
+}
+
+function pushBandwidthPref() {
+  if (!swSupported || !navigator.serviceWorker.controller) return;
+  let mode = "auto";
+  try {
+    const saved = localStorage.getItem("golinux.bwMode");
+    if (saved === "slow" || saved === "fast" || saved === "auto") mode = saved;
+  } catch (_) {}
+  navigator.serviceWorker.controller.postMessage({
+    type: "set-bandwidth-mode",
+    mode,
+  });
+}
+
+function reportThroughputToSW(bps) {
+  if (!(bps > 0) || !Number.isFinite(bps)) return;
+  const threshold = typeof GL_SLOW_LINK_BPS === "number" ? GL_SLOW_LINK_BPS : (300 * 1024);
+  noteObservedNetwork(bps, bps < threshold ? "slow" : "fast");
+  if (swSupported && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({
+      type: "report-throughput",
+      bps,
     });
   }
 }
@@ -198,10 +224,20 @@ export async function prepareChunkAccess() {
     } catch (e) { /* offline or update check timed out; proceed with cached SW */ }
   }
 
-  const controlled = await waitForWorkerControl(6000);
+  let slowNoticeTimer = null;
+  if (!navigator.serviceWorker.controller) {
+    slowNoticeTimer = setTimeout(() => {
+      if (!upgradeReloading && !bootStarted) {
+        setLoading("Preparing GoLinux", "Caching lightweight app shell (first visit only)…");
+      }
+    }, 2500);
+  }
+  const controlled = await waitForWorkerControl(25000);
+  if (slowNoticeTimer) clearTimeout(slowNoticeTimer);
   if (upgradeReloading) return false;
   if (controlled) {
     pushAssetBase();
+    pushBandwidthPref();
     await initChunkFallback();
     return true;
   }
@@ -240,31 +276,49 @@ async function snapshotAvailable(url) {
 }
 
 async function fetchSnapshotWithProgress(url, onProgress) {
+  const fetchStart = performance.now();
   const res = await fetch(url);
   if (!res.ok) throw new Error("snapshot fetch failed: " + res.status);
 
   const total = Number(res.headers.get("Content-Length")) || 0;
   if (!res.body || !res.body.getReader) {
     const buf = await res.arrayBuffer();
-    onProgress(buf.byteLength, buf.byteLength);
-    return buf;
+    const dt = Math.max(0.05, (performance.now() - fetchStart) / 1000);
+    const bps = buf.byteLength / dt;
+    onProgress(buf.byteLength, buf.byteLength, bps);
+    return { buffer: buf, bps };
   }
 
   const reader = res.body.getReader();
   const parts = [];
   let loaded = 0;
+  let lastT = performance.now();
+  let lastLoaded = 0;
+  let ewmaBps = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     parts.push(value);
     loaded += value.byteLength;
-    onProgress(loaded, total || loaded);
+    const now = performance.now();
+    const dt = (now - lastT) / 1000;
+    if (dt >= 0.25) {
+      const inst = (loaded - lastLoaded) / dt;
+      ewmaBps = ewmaBps ? (0.35 * inst + 0.65 * ewmaBps) : inst;
+      lastT = now;
+      lastLoaded = loaded;
+    }
+    const elapsedSec = Math.max(0.05, (now - fetchStart) / 1000);
+    const displayBps = ewmaBps || (loaded / elapsedSec);
+    onProgress(loaded, total || loaded, displayBps);
   }
 
   const out = new Uint8Array(loaded);
   let off = 0;
   for (const p of parts) { out.set(p, off); off += p.byteLength; }
-  return out.buffer;
+  const totalSec = Math.max(0.05, (performance.now() - fetchStart) / 1000);
+  const finalBps = ewmaBps || (loaded / totalSec);
+  return { buffer: out.buffer, bps: finalBps };
 }
 
 async function cacheSnapshotIfNoSW(buffer) {
@@ -342,11 +396,14 @@ export async function bootMachine() {
     }
 
     try {
-      const buf = await fetchSnapshotWithProgress(GL_SNAPSHOT_URL, (l, t) => {
-        if (!cached) showProgress(l, t);
+      const snap = await fetchSnapshotWithProgress(GL_SNAPSHOT_URL, (l, t, bps) => {
+        if (!cached) showProgress(l, t, bps);
       });
-      initialState = { buffer: buf };
-      if (!cached) await cacheSnapshotIfNoSW(buf);
+      initialState = { buffer: snap.buffer };
+      if (!cached) {
+        reportThroughputToSW(snap.bps);
+        await cacheSnapshotIfNoSW(snap.buffer);
+      }
     } catch (e) {
       setStatus("snapshot failed: " + e.message);
     }
@@ -445,6 +502,9 @@ export async function bootMachine() {
     // Resize xterm.js and send out-of-band virtio-console0-resize (zero stdin).
     // On user-state restore, nudge SIGWINCH so bash/nano redraws its real prompt.
     fitSoon({ nudgeRedraw: !!userState });
+
+    // Signal idle pre-warmer that the VM is live.
+    try { window.dispatchEvent(new CustomEvent("gl-emulator-ready")); } catch (_) {}
   });
 
   emu.add_listener("emulator-started", () => setStatus("running"));

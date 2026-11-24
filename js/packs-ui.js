@@ -1,19 +1,44 @@
-/* Offline packs dialog UI (only active when GL_FEATURES.packs === true).
+/* Tools & Offline Cache modal UI (active when GL_FEATURES.packs === true).
  *
- * Fixes:
- *   - BUG-19: dead "golinux-packs-ui" BroadcastChannel removed (GoPacks.onUpdate drives UI).
- *   - BUG-20: removePack()/useMinimal() now await cancel cleanly inside GoPacks.
- *   - BUG-21: fixes "Removed null pack", disables Save while already saved/running,
- *             and clarifies when Common is already included in Full.
+ * Shows:
+ *   - Live measured connection speed + Auto / Low-BW / Fast mode switcher
+ *   - Background idle auto-warm toggle + live warming status
+ *   - Per-tool cache readiness grid with realistic ETAs and one-click Preload
+ *   - Bundle-native offline packs (Minimal, Common tools, Full disk)
  */
 
-import { fmtBytes } from "./status.js";
+import { fmtBytes, fmtEta, fmtSpeed, getLastNetworkInfo } from "./status.js";
+import { cachedChunkNameSet, INSTANT_TOOLS, loadToolSets } from "./tool-progress.js";
+import { getWarmState, isAutoWarmEnabled, setAutoWarmEnabled } from "./prefetch.js";
+
+const BW_PREF_KEY = "golinux.bwMode";
 
 function networkSaysFrugal() {
   const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
   if (!c) return false;
   if (c.saveData) return true;
   return /^(slow-2g|2g|3g)$/.test(c.effectiveType || "");
+}
+
+function getSavedBwPref() {
+  try {
+    const v = localStorage.getItem(BW_PREF_KEY);
+    if (v === "auto" || v === "slow" || v === "fast") return v;
+  } catch (_) {}
+  return "auto";
+}
+
+function saveBwPref(mode) {
+  try { localStorage.setItem(BW_PREF_KEY, mode); } catch (_) {}
+  if ("serviceWorker" in navigator && navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({ type: "set-bandwidth-mode", mode });
+  }
+}
+
+function requestBwStatus() {
+  if ("serviceWorker" in navigator && navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({ type: "get-bandwidth-status" });
+  }
 }
 
 function packLabel(id, st, allStates) {
@@ -37,7 +62,9 @@ function packSizes(states, manifest) {
 }
 
 export function setupPacksUI() {
-  if (!GL_FEATURES.packs || !window.GoPacks) return;
+  if (!GL_FEATURES.packs || !window.GoPacks) {
+    return { refreshBandwidth() {}, refreshWarmState() {} };
+  }
 
   const packsEl = document.getElementById("packs");
   const packStatusEl = document.getElementById("packStatus");
@@ -49,8 +76,124 @@ export function setupPacksUI() {
   const packCancelBtn = document.getElementById("packCancel");
   const openBtn = document.getElementById("openPacks");
   const closeBtn = document.getElementById("closePacks");
+  const bwBadgeEl = document.getElementById("bwSpeedBadge");
+  const bwSegButtons = Array.from(document.querySelectorAll(".bw-seg button[data-bw]"));
+  const autoWarmToggle = document.getElementById("autoWarmToggle");
+  const autoWarmStateEl = document.getElementById("autoWarmState");
+  const toolsGridEl = document.getElementById("toolsGrid");
+  const toolsReadyCountEl = document.getElementById("toolsReadyCount");
 
   let packManifest = {};
+  let currentBwPref = getSavedBwPref();
+
+  function renderBandwidth(infoOverride) {
+    const info = infoOverride || getLastNetworkInfo();
+    const bps = info && info.bps > 0 ? info.bps : null;
+    const mode = (info && (info.mode === "slow" || info.mode === "fast"))
+      ? info.mode
+      : (currentBwPref === "slow" ? "slow" : (networkSaysFrugal() ? "slow" : "fast"));
+
+    if (bwBadgeEl) {
+      const speed = bps ? fmtSpeed(bps) : "";
+      const modeLbl = mode === "slow" ? "Low-BW (Range)" : "Fast (Bundles)";
+      bwBadgeEl.textContent = speed ? `${speed} · ${modeLbl}` : modeLbl;
+      bwBadgeEl.classList.toggle("slow", mode === "slow");
+    }
+    for (const btn of bwSegButtons) {
+      btn.setAttribute("aria-pressed", String(btn.getAttribute("data-bw") === currentBwPref));
+    }
+    const frugalEl = document.getElementById("saveDataNote");
+    if (frugalEl) frugalEl.classList.toggle("visible", mode === "slow" || networkSaysFrugal());
+  }
+
+  function renderWarmState(state) {
+    const st = state || getWarmState();
+    if (autoWarmToggle) autoWarmToggle.checked = !!st.enabled;
+    if (autoWarmStateEl) {
+      autoWarmStateEl.textContent = st.status ? `(${st.status})` : "";
+    }
+    if (packsEl && packsEl.classList.contains("visible") && st.status &&
+        (st.status === "all warmed" || st.status === "core tools warmed" || st.status.startsWith("warming"))) {
+      renderToolsGrid();
+    }
+  }
+
+  async function renderToolsGrid() {
+    if (!toolsGridEl) return;
+    const sets = await loadToolSets();
+    const have = await cachedChunkNameSet();
+    const info = getLastNetworkInfo();
+    const bps = info && info.bps > 0 ? info.bps : null;
+    const running = window.GoPacks.getJob ? window.GoPacks.getJob() : null;
+    const busy = !!running;
+
+    const rows = [];
+    for (const t of INSTANT_TOOLS) {
+      rows.push({ id: t.id, title: t.title, ready: true, remBytes: 0, list: [] });
+    }
+    if (sets) {
+      const ids = Object.keys(sets).sort((a, b) => (sets[a].bytes || 0) - (sets[b].bytes || 0));
+      for (const id of ids) {
+        const s = sets[id];
+        let missing = 0;
+        for (const ch of s.list) if (!have.has(ch)) missing++;
+        const fracMissing = s.list.length ? (missing / s.list.length) : 0;
+        const remBytes = Math.round((s.bytes || 0) * fracMissing);
+        rows.push({
+          id,
+          title: s.title || id,
+          ready: missing === 0,
+          remBytes,
+          list: s.list,
+        });
+      }
+    }
+
+    const readyCount = rows.filter((r) => r.ready).length;
+    if (toolsReadyCountEl) {
+      toolsReadyCountEl.textContent = `${readyCount}/${rows.length} ready`;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const r of rows) {
+      const chip = document.createElement("div");
+      chip.className = "tool-chip" + (r.ready ? " ready" : "");
+
+      const meta = document.createElement("div");
+      meta.className = "tc-meta";
+
+      const nameEl = document.createElement("span");
+      nameEl.className = "tc-name";
+      nameEl.textContent = r.title;
+
+      const subEl = document.createElement("span");
+      subEl.className = "tc-sub";
+      if (r.ready) {
+        subEl.textContent = "Ready · instant";
+      } else {
+        const sz = fmtBytes(r.remBytes) || "…";
+        const eta = bps && r.remBytes > 0 ? fmtEta(r.remBytes / bps).replace(" left", "") : "";
+        subEl.textContent = eta ? `${sz} · ${eta}` : sz;
+      }
+
+      meta.append(nameEl, subEl);
+      chip.appendChild(meta);
+
+      if (!r.ready) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.setAttribute("data-preload-tool", r.id);
+        btn.disabled = busy;
+        btn.textContent = (running && running.kind === "tool" && running.packId === r.id) ? "…" : "Preload";
+        chip.appendChild(btn);
+      }
+
+      frag.appendChild(chip);
+    }
+
+    toolsGridEl.textContent = "";
+    toolsGridEl.appendChild(frag);
+  }
 
   async function showQuota() {
     const el = document.getElementById("packQuota");
@@ -67,18 +210,25 @@ export function setupPacksUI() {
     states = states || {};
     const running = window.GoPacks.getJob ? window.GoPacks.getJob() : null;
     const busy = !!running;
+    const info = getLastNetworkInfo();
+    const bps = info && info.bps > 0 ? info.bps : null;
 
     for (const id of ["minimal", "common", "full"]) {
       const sizeEl = document.querySelector(`[data-size="${id}"]`);
       const badgeEl = document.querySelector(`[data-badge="${id}"]`);
       const row = document.querySelector(`.pack[data-pack="${id}"]`);
-      const info = packManifest[id];
+      const infoPack = packManifest[id];
       const st = states[id];
 
-      if (sizeEl && info) {
-        sizeEl.textContent = id === "minimal"
-          ? fmtBytes(info.totalBytes)
-          : `${fmtBytes(info.bytes)} · ${fmtBytes(info.totalBytes)} total`;
+      if (sizeEl && infoPack) {
+        if (id === "minimal") {
+          sizeEl.textContent = fmtBytes(infoPack.totalBytes);
+        } else {
+          const eta = bps && !(st && st.complete) && infoPack.bytes
+            ? " · " + fmtEta(infoPack.bytes / bps).replace(" left", "")
+            : "";
+          sizeEl.textContent = `${fmtBytes(infoPack.bytes)}${eta}`;
+        }
       }
       if (badgeEl) {
         badgeEl.textContent = id === "minimal" ? "" : "· " + packLabel(id, st, states);
@@ -106,8 +256,7 @@ export function setupPacksUI() {
       }
     }
 
-    const frugalEl = document.getElementById("saveDataNote");
-    if (frugalEl) frugalEl.classList.toggle("visible", networkSaysFrugal());
+    renderBandwidth();
     showQuota();
   }
 
@@ -120,23 +269,54 @@ export function setupPacksUI() {
     packProgressEl.classList.add("visible");
     const pct = j.total ? (j.done / j.total) * 100 : 0;
     packProgressFill.style.width = pct.toFixed(1) + "%";
-    const verb = j.paused ? "Paused" : (j.kind === "download" ? "Downloading" : "Removing");
-    packProgressLabel.textContent = `${verb} ${j.packId} pack`;
-    packProgressPct.textContent = `${j.done}/${j.total} · ${fmtBytes(j.loaded)}`;
+    const isDownloadLike = j.kind === "download" || j.kind === "tool";
+    const verb = j.paused
+      ? "Paused"
+      : (j.kind === "tool" ? "Preloading" : (j.kind === "download" ? "Downloading" : "Removing"));
+    const noun = j.kind === "tool" ? j.packId : `${j.packId} pack`;
+    packProgressLabel.textContent = `${verb} ${noun}`;
+    packProgressPct.textContent = `${j.done}/${j.total} · ${fmtBytes(j.loaded) || "0 KB"}`;
     packPauseBtn.textContent = j.paused ? "Resume" : "Pause";
-    packPauseBtn.disabled = j.kind !== "download";
+    packPauseBtn.disabled = !isDownloadLike;
   }
 
   window.GoPacks.onUpdate((s) => {
     renderPackProgress(s);
     renderPacks(s.states);
+    if (packsEl && packsEl.classList.contains("visible")) {
+      renderToolsGrid();
+    }
   });
+
+  if (autoWarmToggle) {
+    autoWarmToggle.checked = isAutoWarmEnabled();
+    autoWarmToggle.addEventListener("change", () => {
+      setAutoWarmEnabled(autoWarmToggle.checked);
+    });
+  }
+
+  for (const btn of bwSegButtons) {
+    btn.addEventListener("click", () => {
+      const mode = btn.getAttribute("data-bw");
+      if (!mode) return;
+      currentBwPref = mode;
+      saveBwPref(mode);
+      renderBandwidth({
+        bps: getLastNetworkInfo().bps,
+        mode: mode === "auto" ? getLastNetworkInfo().mode : mode,
+      });
+    });
+  }
 
   if (openBtn) {
     openBtn.onclick = async () => {
       packsEl.classList.add("visible");
+      requestBwStatus();
+      renderBandwidth();
+      renderWarmState();
       packManifest = await window.GoPacks.loadManifest();
       renderPacks(await window.GoPacks.packStates());
+      await renderToolsGrid();
     };
   }
   if (closeBtn) closeBtn.onclick = () => packsEl.classList.remove("visible");
@@ -147,6 +327,25 @@ export function setupPacksUI() {
   packsEl.addEventListener("click", async (e) => {
     const t = e.target.closest && e.target.closest("button");
     if (!t || t.disabled) return;
+
+    const preloadToolId = t.getAttribute("data-preload-tool");
+    if (preloadToolId) {
+      packStatusEl.textContent = "";
+      const sets = await loadToolSets();
+      const tool = sets && sets[preloadToolId];
+      if (!tool || !tool.list || !tool.list.length) {
+        packStatusEl.textContent = "Tool manifest unavailable offline.";
+        return;
+      }
+      const res = await window.GoPacks.installTool(preloadToolId, tool.list);
+      if (res && res.refused) packStatusEl.textContent = res.reason;
+      else if (res && res.error) packStatusEl.textContent = "Failed: " + res.error;
+      else if (res && res.cancelled) packStatusEl.textContent = res.reason;
+      else if (res && res.complete) packStatusEl.textContent = `${tool.title} is now cached and ready.`;
+      await renderToolsGrid();
+      return;
+    }
+
     const installId = t.getAttribute("data-install");
     const removeId = t.getAttribute("data-remove");
     if (!installId && !removeId) return;
@@ -186,6 +385,7 @@ export function setupPacksUI() {
         : `Removed ${removeId} pack (${result.deleted} chunks; shared chunks kept).`;
     }
     renderPacks(await window.GoPacks.packStates());
+    await renderToolsGrid();
   });
 
   if (packPauseBtn) {
@@ -201,4 +401,9 @@ export function setupPacksUI() {
       if (!window.GoPacks.cancel()) packStatusEl.textContent = "Nothing to cancel.";
     };
   }
+
+  return {
+    refreshBandwidth: renderBandwidth,
+    refreshWarmState: renderWarmState,
+  };
 }

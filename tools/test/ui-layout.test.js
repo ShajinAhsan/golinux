@@ -131,6 +131,7 @@ async function geometry(cdp) {
         menuBtnShown: getComputedStyle(document.getElementById("barMenuBtn")).display,
         resetShown: getComputedStyle(document.getElementById("resetBtn")).display,
         packsHidden: document.getElementById("openPacks").hidden,
+        packsEnabled: !!(typeof GL_FEATURES !== "undefined" && GL_FEATURES.packs),
         fatalReloadExists: !!document.getElementById("fatalReload"),
       });
     })()`,
@@ -242,7 +243,7 @@ async function geometry(cdp) {
         check(g.menuBtnShown === "none", "menu button hidden on wide screen");
         check(g.resetShown !== "none", "actions shown inline on wide screen");
       }
-      check(g.packsHidden === true, "flagged-off packs button stays hidden");
+      check(g.packsHidden === !g.packsEnabled, `Tools/packs button visibility matches GL_FEATURES.packs (enabled=${g.packsEnabled})`);
       check(g.fatalReloadExists === true, "#fatal includes Reload button (BUG-23)");
       if (g.taFontSize > 0) {
         check(g.taFontSize >= 16, `helper textarea font-size >= 16px (${g.taFontSize}px) prevents iOS zoom (BUG-25)`);

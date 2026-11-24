@@ -20,8 +20,8 @@ import threading
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # Only the files that belong on each origin in production.
-# App origin serves everything EXCEPT images/debian-chunks/ and packs/ (which belong on R2).
-ASSET_PREFIXES = ("images/debian-chunks/", "packs/")
+# App origin serves everything EXCEPT images/debian-chunks/, images/debian-bundles/, bundles/, and packs/ (which belong on R2).
+ASSET_PREFIXES = ("images/debian-chunks/", "images/debian-bundles/", "bundles/", "packs/")
 APP_FORBIDDEN = ASSET_PREFIXES
 
 CT = {
@@ -31,6 +31,7 @@ CT = {
     ".json": "application/json",
     ".wasm": "application/wasm",
     ".zst": "application/zstd",
+    ".pack": "application/octet-stream",
     ".bin": "application/octet-stream",
     ".png": "image/png",
 }
@@ -86,29 +87,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         ext = os.path.splitext(full)[1].lower()
         data = open(full, "rb").read()
+        total = len(data)
+        range_hdr = self.headers.get("Range")
+        status = 200
+        out = data
+        content_range = None
+        if range_hdr and range_hdr.startswith("bytes="):
+            spec = range_hdr[6:].split(",")[0].strip()
+            parts = spec.split("-")
+            if len(parts) == 2 and parts[0].isdigit():
+                start = int(parts[0])
+                end = int(parts[1]) if parts[1].isdigit() else total - 1
+                end = min(end, total - 1)
+                if 0 <= start <= end < total:
+                    status = 206
+                    out = data[start:end + 1]
+                    content_range = f"bytes {start}-{end}/{total}"
 
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", CT.get(ext, "application/octet-stream"))
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(len(out)))
+        self.send_header("Accept-Ranges", "bytes")
+        if content_range:
+            self.send_header("Content-Range", content_range)
 
         if self.cache_headers:
-            # Chunk and pack files are content-addressed by name, so they are
-            # safe to cache forever; hot files must never be.
-            name = os.path.basename(path)
-            if "debian-chunks/" in path or path.startswith("packs/"):
+            # Chunk, bundle, and pack files are cached cleanly.
+            if "debian-chunks/" in path or "debian-bundles/" in path or path.startswith("bundles/") or path.startswith("packs/"):
                 self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             else:
                 self.send_header("Cache-Control", "no-cache")
 
         if self.cors:
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, HEAD")
-            self.send_header("Access-Control-Allow-Headers", "Range, If-None-Match")
-            self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Range")
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Range, If-None-Match, If-Modified-Since")
+            self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Range, ETag")
 
         self.end_headers()
         if body != "HEAD":
-            self.wfile.write(data)
+            self.wfile.write(out)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        if self.cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Range, If-None-Match, If-Modified-Since")
+            self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
 
     def do_GET(self):
         self._serve("GET")

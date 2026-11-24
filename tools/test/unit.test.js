@@ -252,6 +252,14 @@ async function testPureESModules() {
   };
   check(tp.matchTool(["a", "b"], sets) === "gcc", "tool-progress: prefers smaller gcc set over g++");
   check(tp.matchTool(["d", "e", "f"], sets) === "g++", "tool-progress: selects g++ on g++-specific chunks");
+  check(tp.matchTool(["d"], sets) === "g++", "tool-progress: single unique-owner chunk matches immediately on slow links");
+  check(tp.matchTool(["a"], sets) === null, "tool-progress: single shared chunk does not false-match");
+
+  const st = await import(pathToFileURL(path.join(ROOT, "js/status.js")).href);
+  check(st.fmtSpeed(64 * 1024) === "64 KB/s", "status: fmtSpeed formats KB/s cleanly");
+  check(st.fmtSpeed(2.5 * 1048576) === "2.5 MB/s", "status: fmtSpeed formats MB/s cleanly");
+  check(st.fmtEta(42) === "~42s left", "status: fmtEta formats seconds cleanly");
+  check(st.fmtEta(95) === "~1m 35s left", "status: fmtEta formats minutes+seconds cleanly");
 }
 
 (async () => {

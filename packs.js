@@ -26,6 +26,7 @@
 
   let manifest = {};
   let lists = {};
+  let bundleIndexCache = undefined; // undefined=unloaded, null=unavailable, object=loaded
   let onUpdate = () => {};
   let job = null;
   let activeJobPromise = null;
@@ -43,6 +44,49 @@
   async function cachedUrlSet() {
     const cache = await openPackCache();
     return new Set((await cache.keys()).map((k) => k.url));
+  }
+
+  async function loadBundleIndex() {
+    if (bundleIndexCache !== undefined) return bundleIndexCache;
+    try {
+      if (typeof glBundleUrl !== "function") {
+        bundleIndexCache = null;
+        return null;
+      }
+      const r = await fetch("bundles.json");
+      if (!r.ok) {
+        bundleIndexCache = null;
+        return null;
+      }
+      const data = await r.json();
+      if (!data || !Array.isArray(data.files) || !Array.isArray(data.entries)) {
+        bundleIndexCache = null;
+        return null;
+      }
+      const chunkSize = Number(data.chunkSize) || (128 * 1024);
+      const chunkToBundle = new Map();
+      const bundleCounts = new Map();
+      const bundleSizes = new Map();
+      for (const f of data.files) {
+        bundleCounts.set(f, 0);
+        bundleSizes.set(f, 0);
+      }
+      for (const row of data.entries) {
+        const [idx, fileIdx, off, len] = row;
+        const file = data.files[fileIdx];
+        if (!file) continue;
+        const start = idx * chunkSize;
+        const name = `chunk-${start}-${start + chunkSize}.zst`;
+        chunkToBundle.set(name, { file, off, len });
+        bundleCounts.set(file, (bundleCounts.get(file) || 0) + 1);
+        if (off + len > (bundleSizes.get(file) || 0)) bundleSizes.set(file, off + len);
+      }
+      bundleIndexCache = { chunkToBundle, bundleCounts, bundleSizes };
+      return bundleIndexCache;
+    } catch (e) {
+      bundleIndexCache = null;
+      return null;
+    }
   }
 
   async function loadManifest() {
@@ -186,19 +230,117 @@
 
   /* ---------------- download ---------------- */
 
-  async function download(packId) {
-    const names = await loadList(packId);
-    if (!names.length) throw new Error("pack list is empty");
+  async function storeChunk(cache, name, buf) {
+    await cache.put(keyFor(name), new Response(buf, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/zstd",
+        "Content-Length": String(buf.byteLength),
+      },
+    }));
+  }
 
-    job.total = names.length;
-    job.done = 0;
-    await emit({ broadcast: false, recompute: true });
+  /**
+   * Bundle-native downloader: groups missing chunks by .pack bundle when
+   * bundles.json is available, fetching whole bundles when >= 50% of a bundle
+   * (or <= 96 KB) is needed and exact HTTP Range slices otherwise. Falls back
+   * cleanly to individual chunk URLs when bundles.json is absent.
+   */
+  async function downloadChunkQueue(queue, targetCache) {
+    const bIdx = await loadBundleIndex();
+    const smallLimit = typeof GL_SMALL_BUNDLE_BYTES === "number" ? GL_SMALL_BUNDLE_BYTES : (96 * 1024);
 
-    const cache = await openPackCache();
-    const cached = await cachedUrlSet();
-    const queue = names.filter((n) => !cached.has(keyFor(n)));
-    job.done = names.length - queue.length;
+    if (bIdx && bIdx.chunkToBundle && queue.every((n) => bIdx.chunkToBundle.has(n))) {
+      const byFile = new Map();
+      for (const name of queue) {
+        const meta = bIdx.chunkToBundle.get(name);
+        if (!byFile.has(meta.file)) byFile.set(meta.file, []);
+        byFile.get(meta.file).push({ name, off: meta.off, len: meta.len });
+      }
 
+      const tasks = [];
+      for (const [file, items] of byFile) {
+        const totalInBundle = bIdx.bundleCounts.get(file) || items.length;
+        const bSize = bIdx.bundleSizes.get(file) || 0;
+        const whole = (items.length > 1 && items.length >= Math.ceil(totalInBundle * 0.65)) ||
+          (bSize > 0 && bSize <= smallLimit);
+        if (whole) {
+          tasks.push({ kind: "bundle", file, items });
+        } else {
+          for (const it of items) tasks.push({ kind: "range", file, item: it });
+        }
+      }
+
+      const CONCURRENCY = 3;
+      const worker = async () => {
+        for (;;) {
+          if (!job || job.cancelled || job.quotaError) return;
+          await waitWhilePaused();
+          if (!job || job.cancelled || job.quotaError) return;
+          const task = tasks.shift();
+          if (!task) return;
+          try {
+            const base = glBundleUrl(task.file);
+            const sep = base.includes("?") ? "&" : "?";
+            const url = base + sep + "gl_pack=1";
+
+            if (task.kind === "bundle") {
+              const res = await fetch(url, { signal: abort.signal });
+              if (res.ok) {
+                const buf = await res.arrayBuffer();
+                if (!job || job.cancelled || job.quotaError) return;
+                job.loaded += buf.byteLength;
+                for (const it of task.items) {
+                  if (!job || job.cancelled || job.quotaError) return;
+                  const slice = buf.slice(it.off, it.off + it.len);
+                  await storeChunk(targetCache, it.name, slice);
+                  job.done++;
+                }
+                emit({ broadcast: false, recompute: false });
+              } else {
+                job.done += task.items.length;
+              }
+            } else {
+              const it = task.item;
+              const res = await fetch(url, {
+                signal: abort.signal,
+                headers: { Range: `bytes=${it.off}-${it.off + it.len - 1}` },
+              });
+              if (res.ok) {
+                const buf = await res.arrayBuffer();
+                if (!job || job.cancelled || job.quotaError) return;
+                job.loaded += buf.byteLength;
+                const slice = (res.status === 200 && buf.byteLength >= it.off + it.len)
+                  ? buf.slice(it.off, it.off + it.len)
+                  : buf;
+                if (slice.byteLength === it.len) {
+                  await storeChunk(targetCache, it.name, slice);
+                }
+              }
+              if (job) {
+                job.done++;
+                if (job.done % 4 === 0 || job.done >= job.total) {
+                  emit({ broadcast: false, recompute: false });
+                }
+              }
+            }
+          } catch (e) {
+            if (!job || job.cancelled) return;
+            if (e && e.name === "QuotaExceededError") {
+              job.quotaError = true;
+              try { abort && abort.abort(); } catch (_) {}
+              return;
+            }
+            if (job) job.done += (task.kind === "bundle" ? task.items.length : 1);
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+      return;
+    }
+
+    // Fallback when bundles.json is absent: direct chunk URL fetches.
     const CONCURRENCY = 6;
     const worker = async () => {
       for (;;) {
@@ -215,9 +357,7 @@
             const buf = await res.arrayBuffer();
             if (!job || job.cancelled || job.quotaError) return;
             job.loaded += buf.byteLength;
-            await cache.put(keyFor(name), new Response(buf, {
-              headers: { "Content-Length": String(buf.byteLength) },
-            }));
+            await storeChunk(targetCache, name, buf);
           }
         } catch (e) {
           if (!job || job.cancelled) return;
@@ -236,6 +376,22 @@
     };
 
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  }
+
+  async function download(packId) {
+    const names = await loadList(packId);
+    if (!names.length) throw new Error("pack list is empty");
+
+    job.total = names.length;
+    job.done = 0;
+    await emit({ broadcast: false, recompute: true });
+
+    const cache = await openPackCache();
+    const cached = await cachedUrlSet();
+    const queue = names.filter((n) => !cached.has(keyFor(n)));
+    job.done = names.length - queue.length;
+
+    await downloadChunkQueue(queue, cache);
 
     const quotaError = job.quotaError;
     const cancelled = job.cancelled;
@@ -258,6 +414,37 @@
       };
     }
     return { complete: true };
+  }
+
+  async function downloadTool(toolId, chunkNames) {
+    const unique = [...new Set(chunkNames || [])];
+    if (!unique.length) return { complete: true };
+
+    job.total = unique.length;
+    job.done = 0;
+    await emit({ broadcast: false, recompute: false });
+
+    const dataCache = await caches.open(GL_DATA_CACHE);
+    const have = new Set();
+    for (const cn of [GL_PACK_CACHE, GL_DATA_CACHE]) {
+      try {
+        const c = await caches.open(cn);
+        for (const k of await c.keys()) have.add(k.url);
+      } catch (_) {}
+    }
+
+    const queue = unique.filter((n) => !have.has(keyFor(n)));
+    job.done = unique.length - queue.length;
+
+    await downloadChunkQueue(queue, dataCache);
+
+    if (job.quotaError) {
+      return { error: "Storage quota exceeded. Free browser storage and retry." };
+    }
+    if (job.cancelled) {
+      return { cancelled: true, reason: `Cancelled preloading ${toolId}.` };
+    }
+    return { complete: true, toolId };
   }
 
   /* ---------------- removal ---------------- */
@@ -307,6 +494,13 @@
     return withJob("download", packId, () => download(packId));
   }
 
+  async function installTool(toolId, chunkNames) {
+    if (!toolId || !Array.isArray(chunkNames) || !chunkNames.length) {
+      return { refused: true, reason: "No chunks to preload for " + toolId };
+    }
+    return withJob("tool", toolId, () => downloadTool(toolId, chunkNames));
+  }
+
   async function removePack(packId) {
     if (!REAL_PACKS.includes(packId)) {
       return { refused: true, reason: "Unknown pack: " + packId };
@@ -351,6 +545,7 @@
     loadManifest,
     packStates,
     install,
+    installTool,
     removePack,
     useMinimal,
     verify,

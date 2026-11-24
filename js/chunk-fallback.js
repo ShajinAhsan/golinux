@@ -32,10 +32,30 @@ const CHUNK_URL_RE = /\/debian-chunks\/(?:[^/]+\/)?(chunk-\d+-\d+\.zst)(?:[?#].*
 let emptyChunkBytes = null;
 let chunkToBundle = null;      // Map<chunkName, { file, off, len }>
 let bundleToChunks = null;     // Map<file, Array<{ name, off, len }>>
+let bundleSizes = null;        // Map<file, number>
 const memChunks = new Map();   // fallback in-memory cache: chunkName -> ArrayBuffer
 const inflight = new Map();    // file -> Promise<{ status, map? }>
+const inflightRange = new Map(); // chunkName -> Promise<{ status, buf? }>
 let installed = false;
 let reRegisterTimer = null;
+let fallbackBps = null;
+
+function isSlowFallback() {
+  const pref = (() => {
+    try { return localStorage.getItem("golinux.bwMode") || "auto"; } catch (_) { return "auto"; }
+  })();
+  if (pref === "slow") return true;
+  if (pref === "fast") return false;
+  const threshold = typeof GL_SLOW_LINK_BPS === "number" ? GL_SLOW_LINK_BPS : (300 * 1024);
+  if (fallbackBps != null) return fallbackBps < threshold;
+  const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (c) {
+    if (c.saveData) return true;
+    if (/^(slow-2g|2g|3g)$/.test(c.effectiveType || "")) return true;
+    if (typeof c.downlink === "number" && c.downlink > 0 && c.downlink < 2.5) return true;
+  }
+  return false;
+}
 
 function reRegisterSW() {
   if (!("serviceWorker" in navigator) || !navigator.serviceWorker) return;
@@ -62,7 +82,11 @@ export async function initChunkFallback() {
         const chunkSize = Number(data.chunkSize) || (128 * 1024);
         const c2b = new Map();
         const b2c = new Map();
-        for (const f of data.files) b2c.set(f, []);
+        const bsz = new Map();
+        for (const f of data.files) {
+          b2c.set(f, []);
+          bsz.set(f, 0);
+        }
         for (const row of data.entries) {
           const [idx, fileIdx, off, len] = row;
           const file = data.files[fileIdx];
@@ -71,9 +95,11 @@ export async function initChunkFallback() {
           const name = `chunk-${start}-${start + chunkSize}.zst`;
           c2b.set(name, { file, off, len });
           b2c.get(file).push({ name, off, len });
+          if (off + len > (bsz.get(file) || 0)) bsz.set(file, off + len);
         }
         chunkToBundle = c2b;
         bundleToChunks = b2c;
+        bundleSizes = bsz;
       }
     }
   } catch (e) {
@@ -136,6 +162,68 @@ async function fetchBundleDirect(file) {
   return p;
 }
 
+async function fetchChunkRangeDirect(name, meta) {
+  if (inflightRange.has(name)) return inflightRange.get(name);
+  const p = (async () => {
+    const t0 = Date.now();
+    try {
+      const url = typeof glBundleUrl === "function"
+        ? glBundleUrl(meta.file)
+        : (GL_ASSET_BASE + "/" + GL_BUNDLES_PATH + meta.file);
+      const res = await fetch(url, {
+        headers: { Range: `bytes=${meta.off}-${meta.off + meta.len - 1}` },
+      });
+      if (!res.ok) return { status: res.status };
+      const buf = await res.arrayBuffer();
+      const dt = Math.max(1, Date.now() - t0);
+      if (buf.byteLength > 0) fallbackBps = buf.byteLength / (dt / 1000);
+
+      if (res.status === 206 && buf.byteLength === meta.len) {
+        if (memChunks.size > 800) memChunks.clear();
+        memChunks.set(name, buf);
+        try {
+          if (typeof caches !== "undefined") {
+            const cache = await caches.open(GL_DATA_CACHE);
+            cache.put(
+              new Request(location.origin + "/" + GL_CHUNK_PATH + name, { method: "GET" }),
+              new Response(buf.slice(0), {
+                status: 200,
+                headers: {
+                  "Content-Type": "application/zstd",
+                  "Content-Length": String(buf.byteLength),
+                },
+              })
+            ).catch(() => {});
+          }
+        } catch (_) {}
+        hideOfflineBanner();
+        return { status: 200, buf };
+      }
+
+      if (res.status === 200 && buf.byteLength >= meta.off + meta.len) {
+        const members = (bundleToChunks && bundleToChunks.get(meta.file)) || [];
+        if (memChunks.size > 800) memChunks.clear();
+        let wanted = null;
+        for (const m of members) {
+          const slice = buf.slice(m.off, m.off + m.len);
+          memChunks.set(m.name, slice);
+          if (m.name === name) wanted = slice;
+        }
+        hideOfflineBanner();
+        if (wanted) return { status: 200, buf: wanted };
+      }
+      return { status: 502 };
+    } catch (e) {
+      return { status: 0, error: e };
+    }
+  })();
+  inflightRange.set(name, p);
+  p.finally(() => {
+    if (inflightRange.get(name) === p) inflightRange.delete(name);
+  });
+  return p;
+}
+
 async function resolveChunkDirect(name, method) {
   if (!chunkToBundle) return { status: 404, missing: true };
 
@@ -165,6 +253,28 @@ async function resolveChunkDirect(name, method) {
   if (memChunks.has(name)) {
     const hit = memChunks.get(name);
     return { status: 200, buf: hit.slice(0), len: hit.byteLength };
+  }
+
+  const smallLimit = typeof GL_SMALL_BUNDLE_BYTES === "number" ? GL_SMALL_BUNDLE_BYTES : (96 * 1024);
+  const bSize = (bundleSizes && bundleSizes.get(meta.file)) || 0;
+  if (isSlowFallback() && (bSize === 0 || bSize > smallLimit)) {
+    const res = await fetchChunkRangeDirect(name, meta);
+    if (res.status === 200 && res.buf) {
+      return { status: 200, buf: res.buf.slice(0), len: res.buf.byteLength };
+    }
+    if (res.status === 0) {
+      showOfflineBanner();
+      return { status: 408 };
+    }
+    if (res.status === 404) {
+      showFatal(
+        "This version is out of date",
+        "Disk data for this build could not be loaded (missing bundle " +
+        meta.file + "). Reload the page to load the current version."
+      );
+      return { status: 404, missing: true };
+    }
+    return { status: res.status || 502 };
   }
 
   const res = await fetchBundleDirect(meta.file);

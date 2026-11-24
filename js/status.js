@@ -10,7 +10,22 @@ export function mb(n) {
 export function fmtBytes(bytes) {
   if (!bytes) return "";
   if (bytes >= 1048576) return mb(bytes) + " MB";
-  return Math.round(bytes / 1024) + " KB";
+  return Math.max(1, Math.round(bytes / 1024)) + " KB";
+}
+
+export function fmtSpeed(bps) {
+  if (!(bps > 0) || !Number.isFinite(bps)) return "";
+  if (bps >= 1048576) return (bps / 1048576).toFixed(1) + " MB/s";
+  return Math.max(1, Math.round(bps / 1024)) + " KB/s";
+}
+
+export function fmtEta(seconds) {
+  if (!(seconds > 0) || !Number.isFinite(seconds)) return "";
+  const s = Math.ceil(seconds);
+  if (s < 60) return `~${s}s left`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return rem ? `~${m}m ${rem}s left` : `~${m}m left`;
 }
 
 export function setStatus(text) {
@@ -55,13 +70,18 @@ export function showFatal(title, detail) {
   clearLoading();
 }
 
-export function showProgress(loaded, total) {
+export function showProgress(loaded, total, bps) {
   const el = $("progress");
   if (!el) return;
   el.classList.add("visible");
   const pct = total ? Math.min(100, (loaded / total) * 100) : 0;
   $("progressFill").style.width = pct.toFixed(1) + "%";
-  $("progressPct").textContent = total ? `${mb(loaded)}/${mb(total)} MB` : `${mb(loaded)} MB`;
+  const parts = [total ? `${mb(loaded)}/${mb(total)} MB` : `${mb(loaded)} MB`];
+  if (bps > 0) {
+    parts.push(fmtSpeed(bps));
+    if (total > loaded) parts.push(fmtEta((total - loaded) / bps));
+  }
+  $("progressPct").textContent = parts.join(" · ");
 }
 
 export function hideProgress() {
@@ -137,32 +157,90 @@ export function setupStatusChrome() {
 
 /* ---------- Floating disk-loading toast (zero layout shift!) ---------- */
 
-const DISK_SHOW_MS = 500;
-const DISK_HIDE_MS = 300;
+const DISK_SHOW_FAST_MS = 450;
+const DISK_SHOW_SLOW_MS = 250;
+const DISK_HIDE_MS = 320;
 let diskShowTimer = null;
 let diskHideTimer = null;
 let diskVisible = false;
 let burstStart = 0;
+let burstBaseBytes = 0;
 let lastDiskFiles = 0;
-let diskStats = { files: 0, bytes: 0 };
+let lastObservedBps = null;
+let lastObservedMode = "fast";
+let diskStats = { files: 0, bytes: 0, inflightBytes: 0, burstBytes: 0, bps: null, mode: "fast" };
 let customLabelFn = null;
 
 export function setDiskLabelProvider(fn) {
   customLabelFn = fn;
 }
 
+export function getLastNetworkInfo() {
+  return { bps: lastObservedBps, mode: lastObservedMode };
+}
+
+export function noteObservedNetwork(bps, mode) {
+  if (bps > 0 && Number.isFinite(bps)) lastObservedBps = bps;
+  if (mode === "slow" || mode === "fast") lastObservedMode = mode;
+}
+
 function renderDiskToast() {
   const labelEl = $("diskLabel");
   const subEl = $("diskSub");
+  const fillEl = $("diskFill");
+  const metaEl = $("diskMeta");
   if (!labelEl || !subEl) return;
-  const custom = customLabelFn && customLabelFn();
+
+  const elapsedMs = burstStart ? (Date.now() - burstStart) : 0;
+  const liveBps = diskStats.bps || lastObservedBps;
+  const custom = customLabelFn && customLabelFn({
+    burstBytes: diskStats.burstBytes,
+    inflightBytes: diskStats.inflightBytes,
+    bps: liveBps,
+    mode: diskStats.mode,
+    elapsedMs,
+  });
+
   if (custom) {
     labelEl.textContent = custom.label;
-    subEl.textContent = custom.sub;
+    subEl.textContent = custom.sub || "";
+    if (fillEl) {
+      if (typeof custom.pct === "number" && Number.isFinite(custom.pct)) {
+        fillEl.classList.remove("indeterminate");
+        fillEl.style.width = Math.max(4, Math.min(100, custom.pct)).toFixed(1) + "%";
+      } else {
+        fillEl.classList.add("indeterminate");
+        fillEl.style.width = "";
+      }
+    }
+    if (metaEl) {
+      metaEl.textContent = custom.meta || "";
+      metaEl.hidden = !custom.meta;
+    }
     return;
   }
+
   labelEl.textContent = "Loading from disk…";
-  subEl.textContent = `${diskStats.files} file${diskStats.files === 1 ? "" : "s"}, ${mb(diskStats.bytes)} MB`;
+  subEl.textContent = diskStats.burstBytes > 0
+    ? fmtBytes(diskStats.burstBytes)
+    : "fetching…";
+  if (fillEl) {
+    fillEl.classList.add("indeterminate");
+    fillEl.style.width = "";
+  }
+  if (metaEl) {
+    if (elapsedMs >= 1200) {
+      const bits = [];
+      if (liveBps) bits.push(fmtSpeed(liveBps));
+      if (diskStats.mode === "slow") bits.push("low-bandwidth mode");
+      bits.push("cached after first run");
+      metaEl.textContent = bits.join(" · ");
+      metaEl.hidden = false;
+    } else {
+      metaEl.textContent = "";
+      metaEl.hidden = true;
+    }
+  }
 }
 
 function showDiskToast() {
@@ -182,7 +260,7 @@ function hideDiskToast(onHide) {
   diskVisible = false;
   const toast = $("diskToast");
   if (toast) toast.classList.remove("visible");
-  diskStats = { files: 0, bytes: 0 };
+  diskStats = { files: 0, bytes: 0, inflightBytes: 0, burstBytes: 0, bps: lastObservedBps, mode: lastObservedMode };
   if (onHide) onHide();
 }
 
@@ -192,24 +270,43 @@ export function handleDiskActivity(msg, { enabled = true, onNames, onBurstEnd } 
   lastDiskFiles = msg.files || 0;
   const busy = !msg.idle && ((msg.pending || 0) > 0 || newFiles > 0);
 
+  if (msg.bps > 0) lastObservedBps = msg.bps;
+  if (msg.mode === "slow" || msg.mode === "fast") lastObservedMode = msg.mode;
+
   if (window.GoPersist && window.GoPersist.setDiskBusy) {
     window.GoPersist.setDiskBusy((msg.pending || 0) > 0);
   }
   if (!enabled) return;
 
-  if (busy && !burstStart) burstStart = now;
+  const showDelay = lastObservedMode === "slow" ? DISK_SHOW_SLOW_MS : DISK_SHOW_FAST_MS;
+
+  if (busy && !burstStart) {
+    burstStart = now;
+    burstBaseBytes = Math.max(0, (msg.bytes || 0) - (newFiles > 0 ? 0 : 0));
+  }
 
   if (busy) {
     clearTimeout(diskHideTimer);
     diskHideTimer = null;
-    diskStats = { files: msg.files || 0, bytes: msg.bytes || 0 };
-    if (onNames && Array.isArray(msg.names) && msg.names.length) {
-      onNames(msg.names, diskVisible);
+    const completedDelta = Math.max(0, (msg.bytes || 0) - burstBaseBytes);
+    const burstBytes = completedDelta + (msg.inflightBytes || 0);
+    diskStats = {
+      files: msg.files || 0,
+      bytes: msg.bytes || 0,
+      inflightBytes: msg.inflightBytes || 0,
+      burstBytes,
+      bps: msg.bps || lastObservedBps,
+      mode: msg.mode || lastObservedMode,
+    };
+    const completedNames = Array.isArray(msg.names) ? msg.names : [];
+    const activeNames = Array.isArray(msg.activeNames) ? msg.activeNames : [];
+    if (onNames && (completedNames.length || activeNames.length)) {
+      onNames(completedNames, activeNames, diskVisible);
     }
     const elapsed = burstStart ? now - burstStart : 0;
     if (diskVisible) {
       renderDiskToast();
-    } else if (elapsed >= DISK_SHOW_MS) {
+    } else if (elapsed >= showDelay) {
       clearTimeout(diskShowTimer);
       diskShowTimer = null;
       showDiskToast();
@@ -217,19 +314,20 @@ export function handleDiskActivity(msg, { enabled = true, onNames, onBurstEnd } 
       diskShowTimer = setTimeout(() => {
         diskShowTimer = null;
         if (!burstStart) return;
-        if (Date.now() - burstStart >= DISK_SHOW_MS && !diskVisible) {
+        if (Date.now() - burstStart >= showDelay && !diskVisible) {
           showDiskToast();
         }
-      }, DISK_SHOW_MS - elapsed);
+      }, showDelay - elapsed);
     }
   } else {
     clearTimeout(diskShowTimer);
     diskShowTimer = null;
     const lasted = burstStart ? now - burstStart : 0;
     burstStart = 0;
+    burstBaseBytes = msg.bytes || 0;
     if (diskVisible && !diskHideTimer) {
       diskHideTimer = setTimeout(() => hideDiskToast(onBurstEnd), DISK_HIDE_MS);
-    } else if (!diskVisible && lasted < DISK_SHOW_MS && onBurstEnd) {
+    } else if (!diskVisible && lasted < showDelay && onBurstEnd) {
       onBurstEnd();
     }
   }

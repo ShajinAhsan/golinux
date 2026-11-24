@@ -113,9 +113,14 @@ let realChunkSet = null;
 let realChunkPromise = null;
 let emptyChunkBytes = null;
 let emptyChunkPromise = null;
-let bundleIndex = null;      // { chunkToBundle: Map<name, {file, off, len}>, bundleToChunks: Map<file, Array<{name, off, len}>> }
+let bundleIndex = null;      // { chunkToBundle, bundleToChunks, bundleSizes }
 let bundleIndexPromise = null;
 const inflightBundles = new Map(); // file -> Promise<{ status, map?: Map<name, ArrayBuffer>, response?: Response }>
+const inflightChunks = new Map();  // chunkName -> Promise<{ status, buf?: ArrayBuffer, response?: Response }>
+let bandwidthPref = "auto";        // "auto" | "slow" | "fast"
+let idleWarmAbort = null;
+let toolWarmQueue = [];
+let toolWarmActive = 0;
 
 /**
  * Return the 25-byte empty-chunk.zst response even if the user cleared Cache
@@ -236,7 +241,11 @@ function loadBundleIndex() {
       const chunkSize = Number(data.chunkSize) || (128 * 1024);
       const chunkToBundle = new Map();
       const bundleToChunks = new Map();
-      for (const f of data.files) bundleToChunks.set(f, []);
+      const bundleSizes = new Map();
+      for (const f of data.files) {
+        bundleToChunks.set(f, []);
+        bundleSizes.set(f, 0);
+      }
       for (const row of data.entries) {
         const [idx, fileIdx, off, len] = row;
         const file = data.files[fileIdx];
@@ -246,8 +255,10 @@ function loadBundleIndex() {
         const meta = { file, off, len };
         chunkToBundle.set(name, meta);
         bundleToChunks.get(file).push({ name, off, len });
+        const end = off + len;
+        if (end > (bundleSizes.get(file) || 0)) bundleSizes.set(file, end);
       }
-      bundleIndex = { chunkToBundle, bundleToChunks };
+      bundleIndex = { chunkToBundle, bundleToChunks, bundleSizes };
       return bundleIndex;
     } catch (e) {
       bundleIndexPromise = null;
@@ -257,60 +268,212 @@ function loadBundleIndex() {
   return bundleIndexPromise;
 }
 
+function abortIdleWarm() {
+  if (idleWarmAbort) {
+    try { idleWarmAbort.abort(); } catch (_) {}
+    idleWarmAbort = null;
+  }
+}
+
+/** Stream a Response body while reporting byte deltas for live UI progress. */
+async function readBodyWithProgress(response, onDelta) {
+  if (!response.body || typeof response.body.getReader !== "function") {
+    const buf = await response.arrayBuffer();
+    if (onDelta && buf.byteLength) onDelta(buf.byteLength);
+    return buf;
+  }
+  const reader = response.body.getReader();
+  const parts = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.byteLength) {
+      parts.push(value);
+      total += value.byteLength;
+      if (onDelta) onDelta(value.byteLength);
+    }
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.byteLength;
+  }
+  return out.buffer;
+}
+
+/** Unpack a complete .pack ArrayBuffer into GL_DATA_CACHE and return Map<name, ArrayBuffer>. */
+async function unpackBundleBuffer(file, buf, pathnamePrefix) {
+  const idx = await loadBundleIndex();
+  const members = (idx && idx.bundleToChunks.get(file)) || [];
+  const cache = await caches.open(GL_DATA_CACHE).catch(() => null);
+  const map = new Map();
+  const puts = [];
+  for (const m of members) {
+    const slice = buf.slice(m.off, m.off + m.len);
+    map.set(m.name, slice);
+    if (cache) {
+      const key = new Request(self.location.origin + pathnamePrefix + m.name, { method: "GET" });
+      const resp = new Response(slice, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/zstd",
+          "Content-Length": String(slice.byteLength),
+        },
+      });
+      puts.push(cache.put(key, resp).catch(() => {}));
+    }
+  }
+  if (puts.length) await Promise.all(puts);
+  return map;
+}
+
 /**
  * Fetch a hybrid .pack bundle once (deduplicated across concurrent chunk reads),
- * slice every .zst chunk inside it directly into GL_DATA_CACHE, and return a
- * transient Map<chunkName, ArrayBuffer> for all waiting callers.
+ * stream byte progress live, slice every .zst chunk inside it directly into
+ * GL_DATA_CACHE, and return a transient Map<chunkName, ArrayBuffer>.
  */
-function fetchAndUnpackBundle(file, triggerName, pathnamePrefix) {
-  if (inflightBundles.has(file)) return inflightBundles.get(file);
+function fetchAndUnpackBundle(file, triggerName, pathnamePrefix, opts) {
+  const bg = !!(opts && opts.background);
+  const isIdle = !!(opts && opts.idle);
+  const signal = opts && opts.signal;
+  if (!isIdle && inflightBundles.has(file)) return inflightBundles.get(file);
 
   const p = (async () => {
-    beginDiskRead();
+    let streamed = 0;
+    if (!bg) beginDiskRead(triggerName);
     const fetchStart = Date.now();
     const bundleUrl = glBundleUrl(file);
     try {
-      const response = await fetch(bundleUrl);
+      const response = await fetch(bundleUrl, signal ? { signal } : undefined);
       if (!response.ok) {
-        endDiskRead(false, 0);
+        if (!bg) endDiskRead(false, 0, triggerName, streamed, triggerName);
         return { status: response.status, response };
       }
-      const buf = await response.arrayBuffer();
-      const idx = await loadBundleIndex();
-      const members = (idx && idx.bundleToChunks.get(file)) || [];
-      const cache = await caches.open(GL_DATA_CACHE).catch(() => null);
-      const map = new Map();
-      const puts = [];
-      for (const m of members) {
-        const slice = buf.slice(m.off, m.off + m.len);
-        map.set(m.name, slice);
-        if (cache) {
-          const key = new Request(self.location.origin + pathnamePrefix + m.name, { method: "GET" });
-          const resp = new Response(slice, {
-            status: 200,
-            headers: {
-              "Content-Type": "application/zstd",
-              "Content-Length": String(slice.byteLength),
-            },
-          });
-          puts.push(cache.put(key, resp).catch(() => {}));
-        }
+      const buf = await readBodyWithProgress(response, (delta) => {
+        streamed += delta;
+        if (!bg) progressDiskRead(delta);
+      });
+      const map = await unpackBundleBuffer(file, buf, pathnamePrefix);
+      noteThroughput(buf.byteLength, Math.max(1, Date.now() - fetchStart));
+      if (!bg) {
+        const unpackedNames = [triggerName];
+        for (const k of map.keys()) if (k !== triggerName) unpackedNames.push(k);
+        endDiskRead(true, buf.byteLength, unpackedNames, streamed, triggerName);
       }
-      if (puts.length) await Promise.all(puts);
-      noteThroughput(buf.byteLength, Date.now() - fetchStart);
-      endDiskRead(true, buf.byteLength, triggerName);
-      return { status: 200, map };
+      return { status: 200, map, totalBytes: buf.byteLength };
     } catch (e) {
-      endDiskRead(false, 0);
-      return { status: 0, error: e };
+      if (!bg) endDiskRead(false, 0, triggerName, streamed, triggerName);
+      return { status: 0, error: e, aborted: !!(e && e.name === "AbortError") };
     }
   })();
 
-  inflightBundles.set(file, p);
-  p.finally(() => {
-    if (inflightBundles.get(file) === p) inflightBundles.delete(file);
-  });
+  if (!isIdle) {
+    inflightBundles.set(file, p);
+    p.finally(() => {
+      if (inflightBundles.get(file) === p) inflightBundles.delete(file);
+    });
+  }
   return p;
+}
+
+/**
+ * Slow-link exact byte-range fetch for a single chunk inside a .pack bundle.
+ * Eliminates 2x-18x over-fetching at 500 Kbps - 1 Mbps while falling back
+ * cleanly if an upstream ignores Range and returns 200 OK.
+ */
+function fetchChunkRange(bMeta, name, pathnamePrefix, opts) {
+  const bg = !!(opts && opts.background);
+  const isIdle = !!(opts && opts.idle);
+  const signal = opts && opts.signal;
+
+  if (!isIdle && inflightChunks.has(name)) return inflightChunks.get(name);
+  if (inflightBundles.has(bMeta.file)) {
+    return inflightBundles.get(bMeta.file).then((res) => {
+      if (res.status === 200 && res.map && res.map.has(name)) {
+        return { status: 200, buf: res.map.get(name) };
+      }
+      return res;
+    });
+  }
+
+  const p = (async () => {
+    let streamed = 0;
+    if (!bg) beginDiskRead(name);
+    const fetchStart = Date.now();
+    const bundleUrl = glBundleUrl(bMeta.file);
+    const rangeHeader = `bytes=${bMeta.off}-${bMeta.off + bMeta.len - 1}`;
+    try {
+      const init = { headers: { Range: rangeHeader } };
+      if (signal) init.signal = signal;
+      const response = await fetch(bundleUrl, init);
+      if (!response.ok) {
+        if (!bg) endDiskRead(false, 0, name, streamed, name);
+        return { status: response.status, response };
+      }
+      const buf = await readBodyWithProgress(response, (delta) => {
+        streamed += delta;
+        if (!bg) progressDiskRead(delta);
+      });
+
+      // Fallback: upstream ignored Range and sent the full 200 bundle.
+      if (response.status === 200 && buf.byteLength >= bMeta.off + bMeta.len) {
+        const map = await unpackBundleBuffer(bMeta.file, buf, pathnamePrefix);
+        noteThroughput(buf.byteLength, Math.max(1, Date.now() - fetchStart));
+        if (!bg) {
+          const unpackedNames = [name];
+          for (const k of map.keys()) if (k !== name) unpackedNames.push(k);
+          endDiskRead(true, buf.byteLength, unpackedNames, streamed, name);
+        }
+        const slice = map.get(name);
+        if (slice) return { status: 200, buf: slice };
+      }
+
+      // Standard 206 Partial Content exact chunk slice.
+      if (response.status === 206 && buf.byteLength === bMeta.len) {
+        const cache = await caches.open(GL_DATA_CACHE).catch(() => null);
+        if (cache) {
+          const key = new Request(self.location.origin + pathnamePrefix + name, { method: "GET" });
+          const resp = new Response(buf.slice(0), {
+            status: 200,
+            headers: {
+              "Content-Type": "application/zstd",
+              "Content-Length": String(buf.byteLength),
+            },
+          });
+          await cache.put(key, resp).catch(() => {});
+        }
+        noteThroughput(buf.byteLength, Math.max(1, Date.now() - fetchStart));
+        if (!bg) endDiskRead(true, buf.byteLength, name, streamed, name);
+        return { status: 200, buf };
+      }
+
+      if (!bg) endDiskRead(false, 0, name, streamed, name);
+      return { status: 502 };
+    } catch (e) {
+      if (!bg) endDiskRead(false, 0, name, streamed, name);
+      return { status: 0, error: e, aborted: !!(e && e.name === "AbortError") };
+    }
+  })();
+
+  if (!isIdle) {
+    inflightChunks.set(name, p);
+    p.finally(() => {
+      if (inflightChunks.get(name) === p) inflightChunks.delete(name);
+    });
+  }
+  return p;
+}
+
+function shouldUseRange(bMeta, idx) {
+  if (!isSlowLink()) return false;
+  const smallLimit = typeof GL_SMALL_BUNDLE_BYTES === "number"
+    ? GL_SMALL_BUNDLE_BYTES
+    : (96 * 1024);
+  const bSize = (idx && idx.bundleSizes && idx.bundleSizes.get(bMeta.file)) || 0;
+  if (bSize > 0 && bSize <= smallLimit) return false;
+  return true;
 }
 
 /**
@@ -349,10 +512,11 @@ function broadcast(msg) {
 /* ---------- disk activity reporting ---------- */
 
 const diskActivity = {
-  pending: 0, files: 0, bytes: 0, lastPost: 0,
-  timer: null, settleTimer: null, recent: [],
+  pending: 0, files: 0, bytes: 0, inflightBytes: 0, lastPost: 0,
+  timer: null, settleTimer: null, recent: [], activeNames: new Set(),
 };
 const BURST_SETTLE_MS = 250;
+const PROGRESS_POST_MS = 200;
 
 function postDiskActivity() {
   diskActivity.lastPost = Date.now();
@@ -362,7 +526,11 @@ function postDiskActivity() {
     pending: diskActivity.pending,
     files: diskActivity.files,
     bytes: diskActivity.bytes,
+    inflightBytes: diskActivity.inflightBytes,
     names: diskActivity.recent,
+    activeNames: Array.from(diskActivity.activeNames),
+    bps: effectiveBps(),
+    mode: currentBandwidthMode(),
   };
   diskActivity.recent = [];
   broadcast(msg);
@@ -379,65 +547,255 @@ function scheduleDiskPost(force) {
     diskActivity.settleTimer = setTimeout(() => {
       diskActivity.settleTimer = null;
       diskActivity.lastPost = Date.now();
+      diskActivity.inflightBytes = 0;
+      diskActivity.activeNames.clear();
       broadcast({
         type: "disk-activity",
         pending: 0,
         files: diskActivity.files,
         bytes: diskActivity.bytes,
+        inflightBytes: 0,
         names: [],
+        activeNames: [],
+        bps: effectiveBps(),
+        mode: currentBandwidthMode(),
         idle: true,
       });
     }, BURST_SETTLE_MS);
   }
 
-  if (force || since >= 250) {
+  if (force || since >= PROGRESS_POST_MS) {
     if (diskActivity.timer) { clearTimeout(diskActivity.timer); diskActivity.timer = null; }
     postDiskActivity();
   } else if (!diskActivity.timer) {
-    diskActivity.timer = setTimeout(postDiskActivity, 250 - since);
+    diskActivity.timer = setTimeout(postDiskActivity, PROGRESS_POST_MS - since);
   }
 }
 
-function beginDiskRead() {
+function beginDiskRead(name) {
+  // Foreground disk reads immediately preempt any background idle warming.
+  abortIdleWarm();
   diskActivity.pending++;
+  if (name) diskActivity.activeNames.add(name);
+  scheduleDiskPost(diskActivity.pending === 1);
+}
+
+function progressDiskRead(deltaBytes) {
+  if (!(deltaBytes > 0)) return;
+  diskActivity.inflightBytes += deltaBytes;
   scheduleDiskPost(false);
 }
 
-function endDiskRead(counted, bytes, name) {
+function endDiskRead(counted, bytes, namesOrName, streamedBytes, activeName) {
   diskActivity.pending = Math.max(0, diskActivity.pending - 1);
+  if (streamedBytes > 0) {
+    diskActivity.inflightBytes = Math.max(0, diskActivity.inflightBytes - streamedBytes);
+  }
+  if (activeName) diskActivity.activeNames.delete(activeName);
+  else if (typeof namesOrName === "string") diskActivity.activeNames.delete(namesOrName);
+
   if (counted) {
     diskActivity.files++;
     diskActivity.bytes += bytes || 0;
-    if (name && diskActivity.recent.length < 256) diskActivity.recent.push(name);
+    if (Array.isArray(namesOrName)) {
+      for (const n of namesOrName) {
+        if (n && diskActivity.recent.length < 256) diskActivity.recent.push(n);
+      }
+    } else if (namesOrName && diskActivity.recent.length < 256) {
+      diskActivity.recent.push(namesOrName);
+    }
   }
   scheduleDiskPost(diskActivity.pending === 0);
 }
 
-/* ---------- throughput probe ---------- */
+/* ---------- throughput probe & adaptive bandwidth mode ---------- */
 
-const throughput = { samples: 0, bytes: 0, ms: 0 };
+const throughput = { samples: 0, bytes: 0, ms: 0, ewmaBps: null, seededBps: null };
 
 function noteThroughput(bytes, ms) {
-  if (throughput.samples >= 10) return;
   if (!(bytes > 0) || !(ms > 0)) return;
+  const instantBps = bytes / (ms / 1000);
   throughput.samples++;
   throughput.bytes += bytes;
   throughput.ms += ms;
+  throughput.ewmaBps = throughput.ewmaBps == null
+    ? instantBps
+    : (0.35 * instantBps + 0.65 * throughput.ewmaBps);
+}
+
+function seedThroughput(bps) {
+  if (!(bps > 0) || !Number.isFinite(bps)) return;
+  throughput.seededBps = bps;
+  if (throughput.ewmaBps == null) throughput.ewmaBps = bps;
 }
 
 function measuredThroughput() {
   if (throughput.samples < 3 || throughput.ms <= 0) return null;
-  return throughput.bytes / (throughput.ms / 1000);
+  return throughput.ewmaBps || (throughput.bytes / (throughput.ms / 1000));
+}
+
+function effectiveBps() {
+  return throughput.ewmaBps || throughput.seededBps || null;
+}
+
+function isSlowLink() {
+  if (bandwidthPref === "slow") return true;
+  if (bandwidthPref === "fast") return false;
+  const bps = effectiveBps();
+  const threshold = typeof GL_SLOW_LINK_BPS === "number" ? GL_SLOW_LINK_BPS : (300 * 1024);
+  if (bps != null) return bps < threshold;
+  const conn = self.navigator && self.navigator.connection;
+  if (conn) {
+    if (conn.saveData) return true;
+    if (/^(slow-2g|2g|3g)$/.test(conn.effectiveType || "")) return true;
+    if (typeof conn.downlink === "number" && conn.downlink > 0 && conn.downlink < 2.5) return true;
+  }
+  return false;
+}
+
+function currentBandwidthMode() {
+  return isSlowLink() ? "slow" : "fast";
+}
+
+async function isChunkCached(name, pathnamePrefix) {
+  const key = new Request(self.location.origin + pathnamePrefix + name, { method: "GET" });
+  for (const cname of [GL_PACK_CACHE, GL_DATA_CACHE]) {
+    try {
+      const c = await caches.open(cname);
+      if (await c.match(key, { ignoreSearch: true })) return true;
+    } catch (_) {}
+  }
+  return false;
+}
+
+async function warmChunkOne(name, opts) {
+  await assetBaseReady;
+  const pathnamePrefix = "/" + GL_CHUNK_PATH;
+  if (await isChunkCached(name, pathnamePrefix)) return { cached: true };
+  if (await isEmptyChunkName(name)) return { cached: true };
+  const idx = await loadBundleIndex();
+  const bMeta = idx && idx.chunkToBundle.get(name);
+  if (!bMeta) return { missing: true };
+  if (shouldUseRange(bMeta, idx)) {
+    return fetchChunkRange(bMeta, name, pathnamePrefix, opts);
+  }
+  return fetchAndUnpackBundle(bMeta.file, name, pathnamePrefix, opts);
+}
+
+function drainToolWarmQueue() {
+  while (toolWarmActive < 2 && toolWarmQueue.length > 0) {
+    const name = toolWarmQueue.shift();
+    if (!name) continue;
+    toolWarmActive++;
+    warmChunkOne(name, { background: true }).catch(() => {}).finally(() => {
+      toolWarmActive--;
+      if (toolWarmQueue.length > 0) drainToolWarmQueue();
+    });
+  }
 }
 
 self.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "get-throughput") {
+  const data = event.data;
+  if (!data || !data.type) return;
+
+  if (data.type === "get-throughput") {
     const bps = measuredThroughput();
     event.source && event.source.postMessage({
       type: "throughput",
       bps,
+      effectiveBps: effectiveBps(),
       samples: throughput.samples,
+      mode: currentBandwidthMode(),
+      pref: bandwidthPref,
     });
+    return;
+  }
+
+  if (data.type === "report-throughput") {
+    seedThroughput(Number(data.bps));
+    return;
+  }
+
+  if (data.type === "set-bandwidth-mode") {
+    const m = data.mode;
+    if (m === "auto" || m === "slow" || m === "fast") {
+      bandwidthPref = m;
+    }
+    event.source && event.source.postMessage({
+      type: "bandwidth-status",
+      bps: effectiveBps(),
+      mode: currentBandwidthMode(),
+      pref: bandwidthPref,
+    });
+    return;
+  }
+
+  if (data.type === "get-bandwidth-status") {
+    event.source && event.source.postMessage({
+      type: "bandwidth-status",
+      bps: effectiveBps(),
+      mode: currentBandwidthMode(),
+      pref: bandwidthPref,
+    });
+    return;
+  }
+
+  if (data.type === "abort-idle-warm") {
+    abortIdleWarm();
+    return;
+  }
+
+  if (data.type === "warm-chunks" && Array.isArray(data.names)) {
+    const names = data.names.slice(0, 8);
+    if (data.priority === "tool") {
+      for (const n of names) {
+        if (n && !toolWarmQueue.includes(n) && toolWarmQueue.length < 6) {
+          toolWarmQueue.push(n);
+        }
+      }
+      drainToolWarmQueue();
+      return;
+    }
+
+    if (data.priority === "idle") {
+      if (diskActivity.pending > 0) {
+        event.source && event.source.postMessage({ type: "idle-warm-result", aborted: true });
+        return;
+      }
+      abortIdleWarm();
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      idleWarmAbort = ctrl;
+      event.waitUntil((async () => {
+        let warmed = 0;
+        let bytes = 0;
+        let aborted = false;
+        for (const n of names) {
+          if ((ctrl && ctrl.signal.aborted) || diskActivity.pending > 0) {
+            aborted = true;
+            break;
+          }
+          const res = await warmChunkOne(n, {
+            background: true,
+            idle: true,
+            signal: ctrl ? ctrl.signal : undefined,
+          });
+          if (res && res.aborted) { aborted = true; break; }
+          if (res && res.status === 200) {
+            warmed++;
+            bytes += (res.buf && res.buf.byteLength) || res.totalBytes || 0;
+          }
+        }
+        if (idleWarmAbort === ctrl) idleWarmAbort = null;
+        event.source && event.source.postMessage({
+          type: "idle-warm-result",
+          warmed,
+          bytes,
+          aborted,
+          bps: effectiveBps(),
+          mode: currentBandwidthMode(),
+        });
+      })());
+    }
   }
 });
 
@@ -532,12 +890,35 @@ self.addEventListener("fetch", (event) => {
         if (empty) return empty;
       }
 
-      // Step 2: Hybrid bundle fetch — fetch the small .pack bundle containing
-      // this chunk once (deduplicated across concurrent reads) and unpack all
-      // sibling chunks into GL_DATA_CACHE in <1 ms.
+      // Step 2: Adaptive bundle/range fetch — on slow links (< ~2.4 Mbps or
+      // Save-Data) fetch ONLY the exact chunk byte range (206 Partial Content)
+      // from the .pack bundle to avoid 2x-18x over-fetching; on fast links or
+      // tiny bundles (<= 96 KB) fetch and unpack the whole .pack bundle once.
       const idx = await loadBundleIndex();
       const bMeta = idx && idx.chunkToBundle.get(name);
       if (bMeta) {
+        if (shouldUseRange(bMeta, idx)) {
+          const res = await fetchChunkRange(bMeta, name, pathnamePrefix);
+          if (res.status === 200 && res.buf) {
+            return new Response(res.buf, {
+              status: 200,
+              headers: {
+                "Content-Type": "application/zstd",
+                "Content-Length": String(res.buf.byteLength),
+              },
+            });
+          }
+          if (res.status === 404) {
+            broadcast({ type: "chunk-missing-real", url: request.url, name });
+            return new Response("", { status: 404, statusText: "bundle missing" });
+          }
+          if (res.status === 0) {
+            broadcast({ type: "chunk-offline", url: request.url, name });
+            return new Response("", { status: 408, statusText: "bundle unavailable offline" });
+          }
+          return res.response || new Response("", { status: res.status || 502 });
+        }
+
         const res = await fetchAndUnpackBundle(bMeta.file, name, pathnamePrefix);
         if (res.status === 200 && res.map && res.map.has(name)) {
           const slice = res.map.get(name);
@@ -562,7 +943,7 @@ self.addEventListener("fetch", (event) => {
 
       // Fallback: direct single-chunk fetch (used only when bundles.json is absent).
       const upstream = GL_ASSET_BASE ? GL_ASSET_BASE + url.pathname : request;
-      beginDiskRead();
+      beginDiskRead(name);
       const fetchStart = Date.now();
       try {
         const response = await fetch(upstream);
@@ -570,11 +951,11 @@ self.addEventListener("fetch", (event) => {
           const cache = await caches.open(GL_DATA_CACHE);
           cache.put(cacheKey, response.clone()).catch(() => {});
           const len = Number(response.headers.get("Content-Length")) || 0;
-          noteThroughput(len, Date.now() - fetchStart);
-          endDiskRead(true, len, name);
+          noteThroughput(len, Math.max(1, Date.now() - fetchStart));
+          endDiskRead(true, len, name, 0, name);
           return response;
         }
-        endDiskRead(false, 0);
+        endDiskRead(false, 0, name, 0, name);
         if (response.status === 404) {
           const knownEmpty = await isEmptyChunkName(name);
           if (knownEmpty) {
@@ -587,7 +968,7 @@ self.addEventListener("fetch", (event) => {
         return response;
       } catch (e) {
         // Offline / network failure.
-        endDiskRead(false, 0);
+        endDiskRead(false, 0, name, 0, name);
         const knownEmpty = await isEmptyChunkName(name);
         if (knownEmpty) {
           const empty = await getEmptyChunkResponse(false);

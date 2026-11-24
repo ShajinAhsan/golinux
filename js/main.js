@@ -8,6 +8,7 @@ import {
   clearLoading,
   handleDiskActivity,
   hideOfflineBanner,
+  noteObservedNetwork,
   setStatus,
   setupStatusChrome,
   showFatal,
@@ -28,6 +29,7 @@ import { setupPersistUI } from "./persist-ui.js";
 import { setupPacksUI } from "./packs-ui.js";
 import { setupTransferUI } from "./transfer.js";
 import { setupToolProgress } from "./tool-progress.js";
+import { handleIdleWarmResult, notifyDiskBusy, setupPrefetch } from "./prefetch.js";
 import { setNetAdapterGetter, setupNetUI } from "./net-ui.js";
 
 function applyFeatureFlags() {
@@ -80,7 +82,7 @@ function setupBarMenu() {
   });
 }
 
-function wireServiceWorkerMessages(toolHooks) {
+function wireServiceWorkerMessages(toolHooks, packsHooks) {
   if (!("serviceWorker" in navigator) || !navigator.serviceWorker) return;
 
   navigator.serviceWorker.addEventListener("message", (e) => {
@@ -89,12 +91,32 @@ function wireServiceWorkerMessages(toolHooks) {
 
     if (data.type === "disk-activity") {
       // A real network chunk fetch succeeded, so connectivity is back.
-      if (!data.idle && (data.bytes || 0) > 0) hideOfflineBanner();
+      if (!data.idle && ((data.bytes || 0) > 0 || (data.inflightBytes || 0) > 0)) {
+        hideOfflineBanner();
+      }
+      notifyDiskBusy(!data.idle && (data.pending || 0) > 0);
       handleDiskActivity(data, {
         enabled: !!GL_FEATURES.diskIndicator,
         onNames: toolHooks.onNames,
         onBurstEnd: toolHooks.onBurstEnd,
       });
+      if (packsHooks && packsHooks.refreshBandwidth) {
+        packsHooks.refreshBandwidth();
+      }
+      return;
+    }
+
+    if (data.type === "bandwidth-status") {
+      noteObservedNetwork(data.bps, data.mode);
+      if (packsHooks && packsHooks.refreshBandwidth) {
+        packsHooks.refreshBandwidth(data);
+      }
+      return;
+    }
+
+    if (data.type === "idle-warm-result") {
+      noteObservedNetwork(data.bps, data.mode);
+      handleIdleWarmResult(data);
       return;
     }
 
@@ -157,10 +179,11 @@ setupBarMenu();
 setupKeyBar();
 observeTerminal();
 setupPersistUI();
-setupPacksUI();
+const packsHooks = setupPacksUI();
 setupTransferUI();
 setNetAdapterGetter(currentNetAdapter);
 setupNetUI();
+setupPrefetch({ onChange: (st) => packsHooks && packsHooks.refreshWarmState && packsHooks.refreshWarmState(st) });
 
 const restartBtn = document.getElementById("restart");
 if (restartBtn && GL_FEATURES.restartButton) {
@@ -168,7 +191,7 @@ if (restartBtn && GL_FEATURES.restartButton) {
 }
 
 const toolHooks = setupToolProgress();
-wireServiceWorkerMessages(toolHooks);
+wireServiceWorkerMessages(toolHooks, packsHooks);
 wireOfflineEvent();
 
 prepareChunkAccess().then((ok) => {

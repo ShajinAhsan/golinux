@@ -45,7 +45,10 @@
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Download
       </button>
-      <button id="openPacks" class="wide-only ghost-btn" data-feature="packs">Offline packs</button>
+      <button id="openPacks" class="wide-only ghost-btn" data-feature="packs" title="Inspect cached tools, bandwidth mode, and offline packs">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+        Tools
+      </button>
       <button id="restart" class="ghost-btn" data-feature="restartButton" title="Restart virtual machine">
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         <span class="btn-lbl">Restart</span>
@@ -59,7 +62,7 @@
       <button id="mNet" role="menuitem" data-feature="network">Internet (Fetch): Off</button>
       <button id="mUpload" role="menuitem" data-feature="upload">Upload to /mnt/host</button>
       <button id="mDownload" role="menuitem" data-feature="download">Download from /mnt/host</button>
-      <button id="mPacks" role="menuitem" data-feature="packs">Save for offline use</button>
+      <button id="mPacks" role="menuitem" data-feature="packs">Tools &amp; offline cache</button>
       <button id="mReset" role="menuitem" class="danger-item">Reset machine</button>
       <a id="mAbout" role="menuitem" href="about.html">About &amp; Licenses</a>
     </div>
@@ -98,14 +101,38 @@
 
   <div id="packs" role="dialog" aria-modal="true" aria-labelledby="packsTitle" data-feature="packs">
     <div id="packsBox" class="modal-box">
-      <h2 id="packsTitle">Save for offline use</h2>
+      <h2 id="packsTitle">Tools &amp; Offline Cache</h2>
       <p class="hint">
-        GoLinux works offline for anything already cached. Pick a pack to cache
-        more of the disk now.
+        Tools download once on first use and stay cached locally. Preload heavy
+        tools here while you work, or tune bandwidth mode for slow links.
       </p>
+
+      <div id="bwPanel">
+        <div class="bw-row">
+          <div class="bw-info">
+            <strong>Connection</strong>
+            <span id="bwSpeedBadge" class="bw-badge">detecting…</span>
+          </div>
+          <div class="bw-seg" role="group" aria-label="Bandwidth mode">
+            <button type="button" data-bw="auto" aria-pressed="true">Auto</button>
+            <button type="button" data-bw="slow" aria-pressed="false" title="Exact byte-range fetches (minimal data)">Low-BW</button>
+            <button type="button" data-bw="fast" aria-pressed="false" title="Full bundle fetches">Fast</button>
+          </div>
+        </div>
+        <label class="bw-toggle">
+          <input type="checkbox" id="autoWarmToggle" checked>
+          <span>Auto-warm everyday tools while idle <em id="autoWarmState"></em></span>
+        </label>
+      </div>
+
       <p id="saveDataNote">
-        Save-Data is on or your connection looks slow. You can still install a pack below.
+        Save-Data is on or your connection looks slow — using low-bandwidth byte-range fetching.
       </p>
+
+      <div class="modal-sec-title">Installed Tools <span id="toolsReadyCount"></span></div>
+      <div id="toolsGrid"></div>
+
+      <div class="modal-sec-title">Offline Disk Packs</div>
 
       <div class="pack" data-pack="minimal">
         <div class="meta">
@@ -120,7 +147,7 @@
         <div class="meta">
           <strong>Common tools</strong><span class="size" data-size="common"></span>
           <span class="badge" data-badge="common"></span>
-          <div class="desc">ls, nano, git, gcc, g++, make, man and dependencies.</div>
+          <div class="desc">ls, nano, git, tcc/gcc, make, man, htop, jq, python3.</div>
         </div>
         <div class="actions">
           <button data-install="common">Save</button>
@@ -168,9 +195,13 @@
 
   <main id="terminal">
     <div id="diskToast" aria-live="polite">
-      <span class="toast-dot" aria-hidden="true"></span>
-      <span id="diskLabel">Loading from disk…</span>
-      <span class="disk-sub" id="diskSub"></span>
+      <div class="dt-top">
+        <span class="toast-dot" aria-hidden="true"></span>
+        <span id="diskLabel">Loading from disk…</span>
+        <span class="disk-sub" id="diskSub"></span>
+      </div>
+      <div class="dt-track"><div class="dt-fill indeterminate" id="diskFill"></div></div>
+      <div class="dt-meta" id="diskMeta" hidden></div>
     </div>
     <div id="netToast" aria-live="polite" data-feature="network">
       <span class="toast-dot" aria-hidden="true"></span>
