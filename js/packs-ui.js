@@ -76,6 +76,7 @@ export function setupPacksUI() {
   const packCancelBtn = document.getElementById("packCancel");
   const openBtn = document.getElementById("openPacks");
   const closeBtn = document.getElementById("closePacks");
+  const clearAllBtn = document.getElementById("clearAllCache");
   const bwBadgeEl = document.getElementById("bwSpeedBadge");
   const bwSegButtons = Array.from(document.querySelectorAll(".bw-seg button[data-bw]"));
   const autoWarmToggle = document.getElementById("autoWarmToggle");
@@ -195,12 +196,40 @@ export function setupPacksUI() {
     toolsGridEl.appendChild(frag);
   }
 
-  async function showQuota() {
+  let lastQuotaAt = 0;
+
+  async function showQuota(force) {
     const el = document.getElementById("packQuota");
     if (!el) return;
+    const now = Date.now();
+    if (!force && now - lastQuotaAt < 1500) return;
+    lastQuotaAt = now;
     try {
-      const est = await navigator.storage.estimate();
-      el.textContent = `using ${fmtBytes(est.usage)} of ${fmtBytes(est.quota)} available`;
+      const actual = window.GoPacks.estimateActualCacheBytes
+        ? await window.GoPacks.estimateActualCacheBytes()
+        : null;
+      const est = (navigator.storage && navigator.storage.estimate)
+        ? await navigator.storage.estimate()
+        : null;
+
+      if (actual && actual.totalBytes > 0) {
+        const realStr = fmtBytes(actual.totalBytes);
+        // Safari/WebKit reports padded or lazily-reclaimed storage in estimate().usage
+        // even after cache deletion; show our real cached size clearly.
+        if (est && est.usage > actual.totalBytes * 2.2 && est.usage > 50 * 1048576) {
+          el.textContent = `${realStr} cached (browser reclaiming ${fmtBytes(est.usage)})`;
+          el.title = `Actual GoLinux disk cache: ${realStr}. Browser reported ${fmtBytes(est.usage)} of ${fmtBytes(est.quota)} (Safari/WebKit reclaims deleted cache space lazily).`;
+        } else if (est && est.quota) {
+          el.textContent = `${realStr} cached · ${fmtBytes(est.quota)} free quota`;
+          el.title = `Browser origin usage: ${fmtBytes(est.usage)} of ${fmtBytes(est.quota)}`;
+        } else {
+          el.textContent = `${realStr} cached`;
+        }
+        return;
+      }
+      if (est) {
+        el.textContent = `using ${fmtBytes(est.usage)} of ${fmtBytes(est.quota)} available`;
+      }
     } catch (e) {
       el.textContent = "";
     }
@@ -257,7 +286,7 @@ export function setupPacksUI() {
     }
 
     renderBandwidth();
-    showQuota();
+    showQuota(!busy);
   }
 
   function renderPackProgress(s) {
@@ -316,6 +345,20 @@ export function setupPacksUI() {
       renderWarmState();
       packManifest = await window.GoPacks.loadManifest();
       renderPacks(await window.GoPacks.packStates());
+      showQuota(true);
+      await renderToolsGrid();
+    };
+  }
+  if (clearAllBtn) {
+    clearAllBtn.onclick = async () => {
+      if (!window.confirm("Clear all cached packs and preloaded tools? Your saved files in /root and boot snapshot stay intact.")) return;
+      packStatusEl.textContent = "";
+      const res = await window.GoPacks.clearToolCaches();
+      if (res && res.refused) packStatusEl.textContent = res.reason;
+      else if (res && res.error) packStatusEl.textContent = "Failed: " + res.error;
+      else packStatusEl.textContent = `Cleared ${res && res.deleted ? res.deleted : 0} cached chunks.`;
+      renderPacks(await window.GoPacks.packStates());
+      showQuota(true);
       await renderToolsGrid();
     };
   }

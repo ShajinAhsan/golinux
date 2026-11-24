@@ -472,17 +472,60 @@
     const names = await loadList(packId);
     const keep = await protectedNames(packId, inProgressId);
     const cache = await openPackCache();
-    job.total = names.length;
-    job.done = 0;
-    let deleted = 0;
+    const existingKeys = await cache.keys();
+    const existingUrls = new Set(existingKeys.map((k) => k.url));
+
+    const toDelete = [];
     for (const n of names) {
-      if (!job.cancelled && !keep.has(n)) {
-        if (await cache.delete(keyFor(n))) deleted++;
+      if (!keep.has(n) && existingUrls.has(keyFor(n))) {
+        toDelete.push(n);
       }
-      job.done++;
-      if (job.done % 50 === 0) emit({ broadcast: false, recompute: false });
     }
-    return { deleted };
+    if (!toDelete.length) return { deleted: 0 };
+
+    const deleteUrls = new Set(toDelete.map((n) => keyFor(n)));
+    const survivingKeys = existingKeys.filter((k) => !deleteUrls.has(k.url));
+
+    // Safari/WebKit does NOT reclaim disk space on per-key cache.delete() calls
+    // (leaving hundreds of MB of orphaned blobs across repeated download/cancel
+    // cycles). Drop the entire GL_PACK_CACHE via caches.delete() to force
+    // immediate compaction, atomically preserving any surviving pack chunks.
+    job.total = toDelete.length;
+    job.done = 0;
+
+    if (survivingKeys.length === 0) {
+      await caches.delete(GL_PACK_CACHE);
+      job.done = job.total;
+      emit({ broadcast: false, recompute: false });
+      return { deleted: toDelete.length };
+    }
+
+    // Snapshot the surviving entries (e.g. Common pack ~6 MB), wipe the bloated
+    // cache directory via caches.delete(), then write only survivors back.
+    const keptRecords = [];
+    for (const req of survivingKeys) {
+      try {
+        const res = await cache.match(req);
+        if (res && res.ok) {
+          const buf = await res.arrayBuffer();
+          keptRecords.push({ url: req.url, buf });
+        }
+      } catch (_) {}
+    }
+    await caches.delete(GL_PACK_CACHE);
+    const fresh = await openPackCache();
+    for (const rec of keptRecords) {
+      await fresh.put(rec.url, new Response(rec.buf, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/zstd",
+          "Content-Length": String(rec.buf.byteLength),
+        },
+      }));
+    }
+    job.done = job.total;
+    emit({ broadcast: false, recompute: false });
+    return { deleted: toDelete.length };
   }
 
   /* ---------------- public actions ---------------- */
@@ -514,15 +557,87 @@
     return withJob("minimal", "minimal", async () => {
       const cache = await openPackCache();
       const keys = await cache.keys();
-      job.total = keys.length;
-      let deleted = 0;
-      for (const k of keys) {
-        if (!job.cancelled && (await cache.delete(k))) deleted++;
-        job.done++;
-        if (job.done % 50 === 0) emit({ broadcast: false, recompute: false });
-      }
+      const deleted = keys.length;
+      job.total = Math.max(1, deleted);
+      // Drop the whole cache so Safari/WebKit immediately reclaims disk space.
+      await caches.delete(GL_PACK_CACHE);
+      job.done = job.total;
+      emit({ broadcast: false, recompute: false });
       return { deleted };
     });
+  }
+
+  /**
+   * Drop all cached packs AND on-demand tool chunks from GL_DATA_CACHE while
+   * preserving the 9.1 MB boot snapshot (compacting both caches for Safari).
+   */
+  async function clearToolCaches() {
+    if (job) await cancelAndWait();
+    return withJob("clear", "cache", async () => {
+      let deleted = 0;
+      try {
+        const packCache = await openPackCache();
+        deleted += (await packCache.keys()).length;
+        await caches.delete(GL_PACK_CACHE);
+      } catch (_) {}
+
+      let snapBuf = null;
+      let snapUrl = null;
+      try {
+        const dataCache = await caches.open(GL_DATA_CACHE);
+        const dataKeys = await dataCache.keys();
+        for (const req of dataKeys) {
+          if (typeof GL_SNAPSHOT_URL === "string" && req.url.endsWith(GL_SNAPSHOT_URL)) {
+            const hit = await dataCache.match(req);
+            if (hit && hit.ok) {
+              snapBuf = await hit.arrayBuffer();
+              snapUrl = req.url;
+            }
+          } else {
+            deleted++;
+          }
+        }
+        await caches.delete(GL_DATA_CACHE);
+        if (snapBuf && snapUrl) {
+          const fresh = await caches.open(GL_DATA_CACHE);
+          await fresh.put(snapUrl, new Response(snapBuf, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/octet-stream",
+              "Content-Length": String(snapBuf.byteLength),
+            },
+          }));
+        }
+      } catch (_) {}
+
+      return { deleted };
+    });
+  }
+
+  async function estimateActualCacheBytes() {
+    const bIdx = await loadBundleIndex();
+    let chunkBytes = 0;
+    let snapshotBytes = 0;
+    let count = 0;
+    for (const cname of [GL_PACK_CACHE, GL_DATA_CACHE]) {
+      try {
+        const c = await caches.open(cname);
+        for (const req of await c.keys()) {
+          const pathname = new URL(req.url).pathname;
+          if (typeof GL_SNAPSHOT_URL === "string" && pathname.endsWith(GL_SNAPSHOT_URL)) {
+            snapshotBytes = (manifest && manifest.minimal && manifest.minimal.snapshotBytes) || (9.1 * 1048576);
+            continue;
+          }
+          const name = pathname.split("/").pop();
+          const meta = bIdx && bIdx.chunkToBundle && bIdx.chunkToBundle.get(name);
+          if (meta) {
+            chunkBytes += meta.len;
+            count++;
+          }
+        }
+      } catch (_) {}
+    }
+    return { chunkBytes, snapshotBytes, totalBytes: chunkBytes + snapshotBytes, count };
   }
 
   async function verify(packId) {
@@ -548,6 +663,8 @@
     installTool,
     removePack,
     useMinimal,
+    clearToolCaches,
+    estimateActualCacheBytes,
     verify,
     cancel,
     cancelAndWait,

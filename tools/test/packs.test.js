@@ -102,11 +102,12 @@ function loadPacks({ fetchImpl, caches, locks, bus }) {
   const glPackUrl = (f) => ORIGIN + "/packs/" + BUILD_ID + "/" + f;
   const glChunkUrl = (n) => ORIGIN + "/" + GL_CHUNK_PATH + n;
   const glBundleUrl = (f) => ORIGIN + "/bundles/" + BUILD_ID + "/" + f;
+  const GL_SNAPSHOT_URL = "images/debian-state.bin.zst";
   const bc = bus || makeBroadcastBus();
 
   const runner = new Function(
     "window", "location", "caches", "fetch", "console",
-    "GL_CHUNK_PATH", "glPackUrl", "glChunkUrl", "glBundleUrl", "BroadcastChannel", "GL_PACK_CACHE", "GL_DATA_CACHE", "GL_SMALL_BUNDLE_BYTES",
+    "GL_CHUNK_PATH", "glPackUrl", "glChunkUrl", "glBundleUrl", "BroadcastChannel", "GL_PACK_CACHE", "GL_DATA_CACHE", "GL_SMALL_BUNDLE_BYTES", "GL_SNAPSHOT_URL",
     "navigator", "confirm", "localStorage",
     src + "\nreturn window.GoPacks;"
   );
@@ -114,7 +115,7 @@ function loadPacks({ fetchImpl, caches, locks, bus }) {
     win, location, caches, fetchImpl,
     { log() {}, warn() {}, error() {} },
     GL_CHUNK_PATH, glPackUrl, glChunkUrl, glBundleUrl,
-    bc.BroadcastChannel, PACK_CACHE, DATA_CACHE, 96 * 1024, { locks }, () => true,
+    bc.BroadcastChannel, PACK_CACHE, DATA_CACHE, 96 * 1024, GL_SNAPSHOT_URL, { locks }, () => true,
     { getItem: () => null, setItem: () => {} }
   );
 }
@@ -310,6 +311,38 @@ async function testBundleNativeInstallTool() {
     "installTool stores preloaded chunk into GL_DATA_CACHE");
 }
 
+async function testSafariCacheCompactionAndClearTools() {
+  const { caches, packs } = newEnv();
+  const deletedBuckets = [];
+  const origDelete = caches.delete.bind(caches);
+  caches.delete = async (name) => {
+    deletedBuckets.push(name);
+    return origDelete(name);
+  };
+  await seed(caches, LISTS.full);
+  const data = await caches.open(DATA_CACHE);
+  await data.put(ORIGIN + "/images/debian-state.bin.zst", new Response("SNAP_BYTES"));
+  await data.put(keyFor("chunk-999-1000.zst"), new Response("ON_DEMAND"));
+
+  // Removing Full while Common is protected MUST drop & rebuild GL_PACK_CACHE (Safari compaction)
+  const r1 = await packs.removePack("full");
+  check(r1.deleted === 3 && deletedBuckets.includes(PACK_CACHE),
+    "removePack compacts GL_PACK_CACHE via caches.delete() for Safari disk reclamation");
+  const afterFull = await cachedNames(caches);
+  check(LISTS.common.every((n) => afterFull.has(keyFor(n))) && afterFull.size === LISTS.common.length,
+    "removePack compaction preserves all surviving Common chunks");
+
+  // clearToolCaches drops both pack & data caches while keeping the boot snapshot
+  deletedBuckets.length = 0;
+  const r2 = await packs.clearToolCaches();
+  check(deletedBuckets.includes(PACK_CACHE) && deletedBuckets.includes(DATA_CACHE) && r2.deleted >= 4,
+    "clearToolCaches compacts both GL_PACK_CACHE and GL_DATA_CACHE via caches.delete()");
+  const freshData = await caches.open(DATA_CACHE);
+  check(!!(await freshData.match(ORIGIN + "/images/debian-state.bin.zst")) &&
+        !(await freshData.match(keyFor("chunk-999-1000.zst"))),
+    "clearToolCaches preserves boot snapshot while removing on-demand tool chunks");
+}
+
 (async () => {
   const tests = [
     testRemoveProtection,
@@ -320,6 +353,7 @@ async function testBundleNativeInstallTool() {
     testUseMinimalKeepsDataCache,
     testLockContention,
     testBundleNativeInstallTool,
+    testSafariCacheCompactionAndClearTools,
   ];
   for (const t of tests) {
     try { await t(); }
