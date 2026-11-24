@@ -197,6 +197,22 @@ button:disabled { opacity: 0.42; cursor: default; }
   border-color: rgba(248, 113, 113, 0.25);
   background: rgba(248, 113, 113, 0.08);
 }
+.net-btn .net-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-dim);
+  flex: 0 0 auto;
+}
+.net-btn.net-on {
+  color: var(--emerald);
+  background: rgba(52, 211, 153, 0.10);
+  border-color: rgba(52, 211, 153, 0.28);
+}
+.net-btn.net-on .net-dot {
+  background: var(--emerald);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.65);
+}
 
 a.nav-link {
   color: var(--fg-dim);
@@ -273,6 +289,45 @@ a.nav-link:hover { color: var(--fg); background: rgba(255, 255, 255, 0.04); }
   background: var(--emerald);
 }
 #diskToast .disk-sub { color: var(--fg-muted); }
+
+/* Floating network status/hint toast (zero layout shift) */
+#netToast {
+  position: absolute;
+  bottom: 12px;
+  right: 14px;
+  z-index: 4;
+  display: none;
+  align-items: center;
+  gap: 7px;
+  max-width: min(460px, calc(100% - 28px));
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(12, 16, 24, 0.94);
+  border: 1px solid var(--border-hi);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  pointer-events: none;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+#netToast.visible { display: inline-flex; }
+#netToast .toast-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cyan);
+  flex: 0 0 auto;
+}
+#netToast.ok {
+  border-color: rgba(52, 211, 153, 0.35);
+  color: var(--emerald);
+}
+#netToast.ok .toast-dot { background: var(--emerald); }
+#netToast.warn {
+  border-color: rgba(251, 191, 36, 0.38);
+  color: #fde68a;
+}
+#netToast.warn .toast-dot { background: var(--amber); }
 
 /* ---------- Progress & Offline Banner ---------- */
 .bar {

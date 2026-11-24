@@ -208,6 +208,8 @@ function recordTool(tool, stateBuffer) {
       hda: makeDisk(),
       filesystem: {},
       virtio_console: true,
+      net_device: { type: "virtio" },
+      preserve_mac_from_state_image: true,
       memory_size: MEMORY_SIZE,
       // Restore the exact state production boots from: same guest RAM, same
       // cold page cache, no boot-time chunk reads.

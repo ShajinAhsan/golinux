@@ -32,7 +32,8 @@ docker run --rm --init --platform linux/386 \
   sh -c '
     set -eu
     apk add -q --no-cache gcc musl-dev make git linux-headers
-    git clone --depth 1 https://repo.or.cz/tinycc.git /tmp/tcc
+    git clone --depth 1 https://repo.or.cz/tinycc.git /tmp/tcc \
+      || git clone --depth 1 https://github.com/TinyCC/tinycc.git /tmp/tcc
     cd /tmp/tcc
     ./configure --prefix=/usr/local --config-musl
     make -j4 >/dev/null
@@ -73,7 +74,7 @@ docker run --rm --privileged \
     tar -xf /work/alpine-rootfs.tar -C /mnt/root
     echo golinux > /mnt/root/etc/hostname
     printf "%s\n" "127.0.0.1 localhost" "127.0.1.1 golinux" > /mnt/root/etc/hosts
-    printf "%s\n" "nameserver 10.0.2.3" > /mnt/root/etc/resolv.conf
+    printf "%s\n" "nameserver 192.168.86.1" > /mnt/root/etc/resolv.conf
     sync
     cp /mnt/root/boot/vmlinuz-virt /images/debian-bzImage
     cp /mnt/root/boot/initramfs-virt /images/debian-initrd

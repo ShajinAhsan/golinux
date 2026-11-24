@@ -11,12 +11,12 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v28";
+const GL_VERSION = "v29";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
- * (e.g. virtio_console, memory_size, OS image) changes so incompatible saved
- * OPFS states are never restored against a mismatched device/RAM layout. */
-const GL_STATE_SCHEMA = 3;
+ * (e.g. virtio_console, virtio_net, memory_size, OS image) changes so incompatible
+ * saved OPFS states are never restored against a mismatched device/RAM layout. */
+const GL_STATE_SCHEMA = 4;
 
 /* Guest RAM and disk size in bytes. Must match tools/image/build-snapshot.sh (MEM_MB=128)
  * and tools/image/build.sh (DISK_SIZE=1G). */
@@ -33,6 +33,7 @@ const GL_FEATURES = Object.freeze({
   upload: true,          // 9p create_file() into /mnt/host (zero stdin injection)
   download: true,        // /mnt/host file browser using 9p read_file() (zero stdin injection)
   restartButton: true,   // safe snapshot restart (re-instantiates V86; never SeaBIOS reboot)
+  network: true,         // opt-in zero-server browser Fetch + DoH over virtio-net (OFF by default)
 });
 
 /* Authoritative app-shell file list, shared by sw.js (precache) and
@@ -51,6 +52,8 @@ const GL_SHELL_FILES = Object.freeze([
   "js/main.js",
   "js/status.js",
   "js/boot.js",
+  "js/net-adapter.js",
+  "js/net-ui.js",
   "js/chunk-fallback.js",
   "js/terminal.js",
   "js/keybar.js",

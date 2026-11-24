@@ -40,6 +40,7 @@ const emulator = new V86({
     size: fs.statSync(path.join(ROOT, "images", "debian.img")).size,
   },
   filesystem: {},
+  net_device: { type: "virtio" },
   cmdline: "root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0",
   memory_size: 128 * 1024 * 1024,
   autostart: true,

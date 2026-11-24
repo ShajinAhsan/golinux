@@ -351,7 +351,7 @@ export default function HomePage() {
             <div className="relative overflow-hidden rounded-[32px] border border-border bg-subtle px-6 py-16 text-center text-ink sm:py-20">
               <p
                 aria-hidden="true"
-                className="pointer-events-none absolute -bottom-3 left-6 font-mono text-[clamp(2rem,7vw,5rem)] font-bold text-ink/[0.045] select-none"
+                className="pointer-events-none absolute -bottom-3 left-6 max-w-full font-mono text-[clamp(1.5rem,7vw,5rem)] font-bold text-ink/[0.045] select-none"
               >
                 root@golinux:~#
               </p>

@@ -33,6 +33,10 @@
     <span id="persistStatus" aria-live="polite"></span>
 
     <div id="barActions">
+      <button id="netBtn" class="wide-only ghost-btn net-btn" data-feature="network" aria-pressed="false" title="Offline sandbox (default). Click to enable zero-server browser Fetch internet.">
+        <span class="net-dot" aria-hidden="true"></span>
+        <span class="net-lbl">Net: Off</span>
+      </button>
       <button id="uploadBtn" class="wide-only ghost-btn" data-feature="upload" title="Upload files into /mnt/host (max 50 MB)">
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
         Upload
@@ -52,6 +56,7 @@
     </div>
 
     <div id="barMenu" role="menu" hidden>
+      <button id="mNet" role="menuitem" data-feature="network">Internet (Fetch): Off</button>
       <button id="mUpload" role="menuitem" data-feature="upload">Upload to /mnt/host</button>
       <button id="mDownload" role="menuitem" data-feature="download">Download from /mnt/host</button>
       <button id="mPacks" role="menuitem" data-feature="packs">Save for offline use</button>
@@ -166,6 +171,10 @@
       <span class="toast-dot" aria-hidden="true"></span>
       <span id="diskLabel">Loading from disk…</span>
       <span class="disk-sub" id="diskSub"></span>
+    </div>
+    <div id="netToast" aria-live="polite" data-feature="network">
+      <span class="toast-dot" aria-hidden="true"></span>
+      <span id="netToastLabel"></span>
     </div>
   </main>
 

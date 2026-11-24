@@ -140,6 +140,7 @@ const emulator = new V86({
   // Real disk bytes, read through a recording wrapper so we see exactly which
   // chunks the tools touch. Boot-time reads happen before recording is enabled.
   hda: wrapRecording(recording),
+  net_device: { type: "virtio" },
   cmdline: "root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0",
   memory_size: 128 * 1024 * 1024,
   autostart: true,

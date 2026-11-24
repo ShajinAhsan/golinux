@@ -12,11 +12,11 @@ const NAV_ITEMS = [
 export function Navbar() {
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-canvas/85 backdrop-blur-md">
-      <div className="mx-auto flex h-16 w-full max-w-[1180px] items-center justify-between gap-4 px-4 sm:px-6">
+      <div className="mx-auto flex h-16 w-full max-w-[1180px] items-center justify-between gap-2 px-3 sm:gap-4 sm:px-6">
         <Link
           href="/"
           aria-label="GoLinux home"
-          className="inline-flex items-center gap-2.5 rounded-lg text-lg font-extrabold tracking-[-0.03em] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg text-lg font-extrabold tracking-[-0.03em] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-canvas sm:gap-2.5"
         >
           <span
             aria-hidden="true"
@@ -51,11 +51,11 @@ export function Navbar() {
           ))}
         </nav>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2.5">
           <a
             data-launch-url=""
             href={SITE.terminalUrl}
-            className="inline-flex items-center justify-center gap-1.5 rounded-full bg-ink px-4 py-2 text-[13px] font-semibold whitespace-nowrap text-canvas transition-colors hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
+            className="inline-flex items-center justify-center gap-1.5 rounded-full bg-ink px-3 py-2 text-[12.5px] font-semibold whitespace-nowrap text-canvas transition-colors hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-canvas sm:px-4 sm:text-[13px]"
           >
             <span>Open terminal</span>
             <svg

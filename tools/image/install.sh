@@ -178,8 +178,36 @@ modprobe 9p 2>/dev/null || true
 modprobe 9pnet 2>/dev/null || true
 modprobe 9pnet_virtio 2>/dev/null || true
 mount -t 9p -o trans=virtio,version=9p2000.L host9p /mnt/host 2>/dev/null || true
+# Bring up loopback and virtio-net eth0 with static virtual LAN config (0ms boot delay,
+# offline-safe by default; host browser SafeFetchNetworkAdapter gates outbound traffic).
+ip link set lo up 2>/dev/null || true
+modprobe virtio_net 2>/dev/null || true
+ip link set eth0 up 2>/dev/null || true
+ip addr replace 192.168.86.100/24 dev eth0 2>/dev/null || true
+ip route replace default via 192.168.86.1 dev eth0 2>/dev/null || true
 RCSEOF
 chmod +x /etc/init.d/rcS
+
+cat > /usr/local/bin/nethelp <<'NETEOF'
+#!/bin/sh
+cat <<'TXT'
+GoLinux Zero-Server Browser Networking
+--------------------------------------
+Status: Toggle "Net: Off / Net: On" in the top bar (no VM restart needed).
+
+What works (zero server, directly from your browser):
+  curl http://api.github.com/zen          # http:// auto-upgrades to HTTPS
+  curl http://wttr.in/?format=3           # CORS-enabled APIs & raw files
+  curl http://httpbin.org/get             # GET / POST / PUT / HEAD
+  nslookup github.com                     # DNS via Cloudflare DoH
+
+Browser security limits (no relay server):
+  - Use http:// with curl (browser upgrades it to HTTPS; port 443 is blocked).
+  - Target server must allow CORS (Access-Control-Allow-Origin).
+  - Non-CORS sites, apk add, git clone, ssh, and private/localhost IPs are blocked.
+TXT
+NETEOF
+chmod +x /usr/local/bin/nethelp
 
 cat > /etc/inittab <<'EOF'
 ::sysinit:/etc/init.d/rcS

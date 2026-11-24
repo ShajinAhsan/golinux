@@ -28,7 +28,8 @@ const MOTD_LINES = [
   "  Tools: BusyBox, bash, tcc/cc (instant C), python3, git, make,",
   "         nano, vi, htop, tmux, jq, tree, man, fastfetch, cowsay, figlet, sl.",
   "",
-  "  Networking is OFF. Your files in /root auto-save locally in this browser.",
+  "  Networking is OFF by default. Toggle 'Net' in the toolbar for safe browser Fetch.",
+  "  Run 'nethelp' for examples. Your files in /root auto-save locally in this browser.",
   "",
 ];
 const MOTD = "printf '%s\\n' " +
@@ -71,6 +72,8 @@ const emulator = new V86({
   },
   filesystem: {},
   virtio_console: true,
+  net_device: { type: "virtio" },
+  preserve_mac_from_state_image: true,
   cmdline: `root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0 ${CMDLINE_EXTRA}`,
   memory_size: MEM_MB * 1024 * 1024,
   autostart: true,
@@ -99,6 +102,8 @@ function maybeStartPrep() {
     "grep -q '__gl_prompt_sp' /root/.bashrc && grep -q 'ls --color=auto' /root/.bashrc || echo 'BASHRC_FAILED'",
     "tcc -v >/dev/null 2>&1 || echo 'TCC_FAILED'",
     "fastfetch >/dev/null 2>&1 || echo 'FASTFETCH_FAILED'",
+    "ip -4 addr show dev eth0 | grep -q '192.168.86.100/24' || echo 'ETH0_FAILED'",
+    "ip -4 addr show dev lo | grep -q '127.0.0.1/8' || echo 'LO_FAILED'",
     PREP,
     "echo PREP_VERIFIED",
   ].join("; ");
@@ -124,6 +129,8 @@ emulator.add_listener("serial0-output-byte", (byte) => {
     ["BASHRC_FAILED", "/root/.bashrc missing __gl_prompt_sp / ls --color=auto"],
     ["TCC_FAILED", "tcc failed to run"],
     ["FASTFETCH_FAILED", "fastfetch failed to run"],
+    ["ETH0_FAILED", "eth0 virtio-net did not configure 192.168.86.100/24"],
+    ["LO_FAILED", "lo loopback interface is not up"],
   ]) {
     if (phase === 1 && appeared(marker)) {
       console.error("[snapshot] ERROR: " + msg);

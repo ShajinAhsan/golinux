@@ -16,6 +16,7 @@ import {
 } from "./status.js";
 import {
   bootMachine,
+  currentNetAdapter,
   isBootStarted,
   prepareChunkAccess,
   restartMachine,
@@ -27,6 +28,7 @@ import { setupPersistUI } from "./persist-ui.js";
 import { setupPacksUI } from "./packs-ui.js";
 import { setupTransferUI } from "./transfer.js";
 import { setupToolProgress } from "./tool-progress.js";
+import { setNetAdapterGetter, setupNetUI } from "./net-ui.js";
 
 function applyFeatureFlags() {
   for (const el of document.querySelectorAll("[data-feature]")) {
@@ -62,6 +64,7 @@ function setupBarMenu() {
     if (!item) return;
     open(false);
     const target = {
+      mNet: "netBtn",
       mPacks: "openPacks",
       mUpload: "uploadBtn",
       mDownload: "downloadBtn",
@@ -156,6 +159,8 @@ observeTerminal();
 setupPersistUI();
 setupPacksUI();
 setupTransferUI();
+setNetAdapterGetter(currentNetAdapter);
+setupNetUI();
 
 const restartBtn = document.getElementById("restart");
 if (restartBtn && GL_FEATURES.restartButton) {

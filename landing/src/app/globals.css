@@ -42,6 +42,7 @@
     background-color: #ffffff;
     color: #1d1d1f;
     color-scheme: light;
+    overflow-x: clip;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }

@@ -18,13 +18,15 @@ import {
 import { currentTerminal, fitSoon } from "./terminal.js";
 import { attachKeyboardInterceptor } from "./keybar.js";
 import { initChunkFallback } from "./chunk-fallback.js";
+import { SafeFetchNetworkAdapter } from "./net-adapter.js";
+import { handleBlockedPortHint, isNetDesiredEnabled, syncNetUI } from "./net-ui.js";
 
 const FRESH_MOTD = [
   "",
   "  \x1b[1;32mGoLinux\x1b[0m \x1b[2m· Alpine Linux 3.21 (x86) · BusyBox + TinyCC · 128 MB WASM VM\x1b[0m",
   "  \x1b[36mTools:\x1b[0m tcc/gcc (instant C), python3, git, make, nano, vi, tmux, htop, jq, tree, man",
   "  \x1b[35mFun:\x1b[0m   fastfetch, cowsay, figlet, sl",
-  "  \x1b[2mOffline-safe (no guest network) · /root persists locally · transfer via /mnt/host\x1b[0m",
+  "  \x1b[2mOffline by default · optional Net toggle (browser Fetch) · /root persists · /mnt/host transfer\x1b[0m",
   "",
 ].join("\r\n");
 
@@ -284,12 +286,17 @@ function clearTerminalMount() {
   const container = document.getElementById("terminal");
   if (!container) return;
   for (const child of Array.from(container.children)) {
-    if (child.id !== "diskToast") child.remove();
+    if (child.id !== "diskToast" && child.id !== "netToast") child.remove();
   }
 }
 
 let ownershipClaimed = false;
 let restarting = false;
+let activeNetAdapter = null;
+
+export function currentNetAdapter() {
+  return activeNetAdapter;
+}
 
 export async function bootMachine() {
   bootStarted = true;
@@ -363,6 +370,8 @@ export async function bootMachine() {
     vga_bios: { url: "assets/bios/vgabios.bin" },
     hda: disk,
     filesystem: {},
+    net_device: { type: "virtio" },
+    preserve_mac_from_state_image: true,
     memory_size: GL_MEMORY_SIZE,
     autostart: true,
   };
@@ -391,6 +400,20 @@ export async function bootMachine() {
   window.__usedSnapshot = !!initialState;
   const emu = new window.V86(options);
   window.emulator = emu;
+
+  if (activeNetAdapter) {
+    try { activeNetAdapter.destroy(); } catch (e) {}
+    activeNetAdapter = null;
+  }
+  if (GL_FEATURES.network && emu.bus) {
+    activeNetAdapter = new SafeFetchNetworkAdapter(emu.bus, {
+      enabled: isNetDesiredEnabled(),
+      onBlockedPort: handleBlockedPortHint,
+      onStateChange: (on) => syncNetUI(on),
+    });
+    window.__netAdapter = activeNetAdapter;
+    syncNetUI(activeNetAdapter.isEnabled());
+  }
 
   try {
     window.Go9p.install(emu);
@@ -444,6 +467,11 @@ export async function restartMachine() {
   if (btn) btn.disabled = true;
   try {
     setStatus("restarting…");
+    if (activeNetAdapter) {
+      try { activeNetAdapter.destroy(); } catch (e) {}
+      activeNetAdapter = null;
+      window.__netAdapter = null;
+    }
     if (window.emulator) {
       try {
         await window.emulator.destroy();

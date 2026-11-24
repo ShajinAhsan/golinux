@@ -784,12 +784,12 @@ async function launchChrome(profileDir, port) {
       expression: `(async () => {
         const ok = await window.GoPersist.saveNow(window.emulator, "manual");
         const meta = await window.GoPersist.readMeta();
-        return JSON.stringify({ ok, meta });
+        return JSON.stringify({ ok, meta, expectedSchema: typeof GL_STATE_SCHEMA === "number" ? GL_STATE_SCHEMA : 4 });
       })()`,
       awaitPromise: true, returnByValue: true,
     })).result.value);
-    check(savedObj.ok && savedObj.meta && savedObj.meta.buildId === buildId && savedObj.meta.schema === 3,
-      "saved state stamped with buildId and schema=3");
+    check(savedObj.ok && savedObj.meta && savedObj.meta.buildId === buildId && savedObj.meta.schema === savedObj.expectedSchema,
+      `saved state stamped with buildId and schema=${savedObj.expectedSchema}`);
 
     await cdp.send("Page.reload", { ignoreCache: false });
     await waitScreen(cdp, /\[session restored\][\s\S]*root@golinux:~#/, 60000, "restored banner + redrawn prompt");
@@ -891,7 +891,7 @@ async function launchChrome(profileDir, port) {
         await sw.close();
         const mf = await dir.getFileHandle("meta.json", { create: true });
         const mw = await mf.createWritable();
-        await mw.write(JSON.stringify({ buildId: "0000000000000001", schema: 3 }));
+        await mw.write(JSON.stringify({ buildId: "0000000000000001", schema: typeof GL_STATE_SCHEMA === "number" ? GL_STATE_SCHEMA : 4 }));
         await mw.close();
       })()`,
       awaitPromise: true,
