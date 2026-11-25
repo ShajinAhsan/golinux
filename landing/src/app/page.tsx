@@ -15,6 +15,7 @@ const STRUCTURED_DATA = {
       name: SITE.name,
       description: SITE.description,
       inLanguage: "en-US",
+      sameAs: [SITE.academyUrl, SITE.githubUrl],
     },
     {
       "@type": "SoftwareApplication",
@@ -65,6 +66,14 @@ const SPECS = [
 
 const KEYS_TOP = ["Esc", "Tab", "Ctrl", "Alt"] as const;
 const KEYS_BOTTOM = ["←", "↓", "↑", "→"] as const;
+
+const ACADEMY_STAGES = [
+  { num: "01", title: "Beginner", levels: "25 levels" },
+  { num: "02", title: "Advanced Beginner", levels: "5 levels" },
+  { num: "03", title: "Competent", levels: "jq & JSON" },
+  { num: "04", title: "Proficient", levels: "Git forensics" },
+  { num: "05", title: "Expert", levels: "C & Make" },
+] as const;
 
 export default function HomePage() {
   return (
@@ -339,6 +348,143 @@ export default function HomePage() {
                   ))}
                 </dl>
               </article>
+            </div>
+          </div>
+        </section>
+
+        {/* ================= GOLINUX ACADEMY ================= */}
+        <section
+          id="academy"
+          aria-labelledby="academy-heading"
+          className="scroll-mt-20 bg-canvas pt-16 pb-4 sm:pt-24 sm:pb-6"
+        >
+          <div className="mx-auto w-full max-w-[1180px] px-4 sm:px-6">
+            <div className="overflow-hidden rounded-[32px] border border-border bg-subtle p-7 sm:p-10 lg:p-12">
+              <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-[1.12fr_0.88fr] lg:gap-12">
+                <div className="min-w-0">
+                  <p className="mb-4 inline-flex items-center gap-2 rounded-full border border-border bg-canvas px-3.5 py-1 text-[12.5px] font-semibold text-ink">
+                    <span
+                      aria-hidden="true"
+                      className="size-2 rounded-full bg-emerald-500"
+                    />
+                    GoLinux Academy · Free interactive wargame
+                  </p>
+
+                  <h2 id="academy-heading" className={H2_CLASS}>
+                    Wanna learn Linux by doing?
+                  </h2>
+
+                  <p className="mb-6 max-w-[54ch] text-[16px] leading-relaxed text-secondary">
+                    Put this browser VM to work with{" "}
+                    <strong className="font-semibold text-ink">
+                      Deep dive into Linux
+                    </strong>{" "}
+                    — 33 hands-on filesystem puzzles across 5 mastery stages.
+                    Explore directories, uncover hidden secrets with real{" "}
+                    <code className={INLINE_CODE_CLASS}>ls</code>,{" "}
+                    <code className={INLINE_CODE_CLASS}>find</code>,{" "}
+                    <code className={INLINE_CODE_CLASS}>grep</code>,{" "}
+                    <code className={INLINE_CODE_CLASS}>jq</code>, and{" "}
+                    <code className={INLINE_CODE_CLASS}>git</code> commands, and
+                    optionally sync progress across devices.
+                  </p>
+
+                  <ul
+                    aria-label="GoLinux Academy mastery stages"
+                    className="mb-7 flex flex-wrap gap-2"
+                  >
+                    {ACADEMY_STAGES.map((stage) => (
+                      <li
+                        key={stage.num}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-border bg-canvas px-3 py-1 text-xs font-medium text-ink"
+                      >
+                        <span className="font-mono text-[11px] font-semibold text-secondary">
+                          {stage.num}
+                        </span>
+                        <span>{stage.title}</span>
+                      </li>
+                    ))}
+                  </ul>
+
+                  <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+                    <a
+                      href={SITE.academyUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center justify-center gap-2 rounded-full bg-ink px-7 py-3.5 text-[15px] font-semibold whitespace-nowrap text-canvas transition-colors hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-subtle"
+                    >
+                      <span>Start GoLinux Academy</span>
+                      <svg
+                        viewBox="0 0 20 20"
+                        width="16"
+                        height="16"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M4 10h12M11 5l5 5-5 5" />
+                      </svg>
+                      <span className="sr-only"> (opens in a new tab)</span>
+                    </a>
+                    <a
+                      href={`${SITE.academyUrl}/beginner`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center justify-center rounded-full border border-border bg-canvas px-6 py-3.5 text-[14.5px] font-semibold whitespace-nowrap text-ink transition-colors hover:border-secondary hover:bg-canvas/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-subtle"
+                    >
+                      Jump to Level 1 — Free
+                      <span className="sr-only"> (opens in a new tab)</span>
+                    </a>
+                  </div>
+                </div>
+
+                <div
+                  aria-hidden="true"
+                  className="overflow-hidden rounded-[22px] border border-border bg-[#0b0d0e] text-[#ededed] shadow-lg"
+                >
+                  <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="size-2.5 rounded-full bg-[#ff5f56]" />
+                      <span className="size-2.5 rounded-full bg-[#ffbd2e]" />
+                      <span className="size-2.5 rounded-full bg-[#27c93f]" />
+                    </div>
+                    <span className="font-mono text-[11.5px] text-[#9aa39b]">
+                      academy.golinux.app/beginner
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5 p-5 font-mono text-[13px] leading-relaxed">
+                    <p className="text-[11px] font-semibold tracking-wider text-[#c8f04a] uppercase">
+                      Mission · Level 04 · Hidden in Plain Sight
+                    </p>
+                    <p>
+                      <span className="text-[#c8f04a]">$</span> ls -la
+                    </p>
+                    <p className="text-[#9aa39b]">
+                      -rw-r--r--&nbsp;&nbsp;1 root root&nbsp;&nbsp;&nbsp;68 .note
+                    </p>
+                    <p>
+                      <span className="text-[#c8f04a]">$</span> cat .note
+                    </p>
+                    <p className="text-[#9aa39b]">
+                      Nice find! Submit this secret to unlock Level 5:
+                    </p>
+                    <p className="inline-block rounded-lg border border-[#c8f04a]/35 bg-[#c8f04a]/12 px-2.5 py-1 font-semibold text-[#c8f04a]">
+                      GLAC-████-████-████-████
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between border-t border-white/10 bg-white/[0.03] px-5 py-3 text-xs text-[#9aa39b]">
+                    <span className="font-medium text-emerald-400">
+                      ✓ 33 levels · 5 stages · ∞ retries
+                    </span>
+                    <span className="font-mono text-[11px]">Alpine 3.21</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </section>

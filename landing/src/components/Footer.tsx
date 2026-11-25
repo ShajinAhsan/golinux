@@ -29,6 +29,15 @@ export function Footer() {
             <a data-launch-url="" href={SITE.terminalUrl} className={LINK_CLASS}>
               Terminal
             </a>
+            <a
+              href={SITE.academyUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={LINK_CLASS}
+            >
+              Academy
+              <span className="sr-only"> (opens in a new tab)</span>
+            </a>
             <Link href="/about" className={LINK_CLASS}>
               Licenses and about
             </Link>

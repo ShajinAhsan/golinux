@@ -3,6 +3,8 @@ export const SITE = {
   url: "https://golinux.app",
   terminalUrl:
     process.env.NEXT_PUBLIC_TERMINAL_URL ?? "https://terminal.golinux.app",
+  academyUrl:
+    process.env.NEXT_PUBLIC_ACADEMY_URL ?? "https://academy.golinux.app",
   githubUrl: "https://github.com/ShajinAhsan/golinux",
   authorName: "Shajin Ahsan",
   authorGithubUrl: "https://github.com/shajinahsan",
