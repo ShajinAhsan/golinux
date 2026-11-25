@@ -67,12 +67,12 @@ const SPECS = [
 const KEYS_TOP = ["Esc", "Tab", "Ctrl", "Alt"] as const;
 const KEYS_BOTTOM = ["←", "↓", "↑", "→"] as const;
 
-const ACADEMY_STAGES = [
-  { num: "01", title: "Beginner", levels: "25 levels" },
-  { num: "02", title: "Advanced Beginner", levels: "5 levels" },
-  { num: "03", title: "Competent", levels: "jq & JSON" },
-  { num: "04", title: "Proficient", levels: "Git forensics" },
-  { num: "05", title: "Expert", levels: "C & Make" },
+const ACADEMY_TOPICS = [
+  "Files & Shell",
+  "Permissions & Pipes",
+  "Search & Logs",
+  "JSON & jq",
+  "Git & C",
 ] as const;
 
 export default function HomePage() {
@@ -379,8 +379,9 @@ export default function HomePage() {
                     <strong className="font-semibold text-ink">
                       Deep dive into Linux
                     </strong>{" "}
-                    — 33 hands-on filesystem puzzles across 5 mastery stages.
-                    Explore directories, uncover hidden secrets with real{" "}
+                    — progressive, hands-on filesystem puzzles from beginner to
+                    expert. Explore directories, uncover hidden secrets with
+                    real{" "}
                     <code className={INLINE_CODE_CLASS}>ls</code>,{" "}
                     <code className={INLINE_CODE_CLASS}>find</code>,{" "}
                     <code className={INLINE_CODE_CLASS}>grep</code>,{" "}
@@ -390,18 +391,15 @@ export default function HomePage() {
                   </p>
 
                   <ul
-                    aria-label="GoLinux Academy mastery stages"
+                    aria-label="GoLinux Academy topics"
                     className="mb-7 flex flex-wrap gap-2"
                   >
-                    {ACADEMY_STAGES.map((stage) => (
+                    {ACADEMY_TOPICS.map((topic) => (
                       <li
-                        key={stage.num}
-                        className="inline-flex items-center gap-1.5 rounded-full border border-border bg-canvas px-3 py-1 text-xs font-medium text-ink"
+                        key={topic}
+                        className="inline-flex items-center rounded-full border border-border bg-canvas px-3 py-1 text-xs font-medium text-ink"
                       >
-                        <span className="font-mono text-[11px] font-semibold text-secondary">
-                          {stage.num}
-                        </span>
-                        <span>{stage.title}</span>
+                        {topic}
                       </li>
                     ))}
                   </ul>
@@ -435,7 +433,7 @@ export default function HomePage() {
                       rel="noopener noreferrer"
                       className="inline-flex items-center justify-center rounded-full border border-border bg-canvas px-6 py-3.5 text-[14.5px] font-semibold whitespace-nowrap text-ink transition-colors hover:border-secondary hover:bg-canvas/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 focus-visible:ring-offset-subtle"
                     >
-                      Jump to Level 1 — Free
+                      Start Beginner — Free
                       <span className="sr-only"> (opens in a new tab)</span>
                     </a>
                   </div>
@@ -452,13 +450,13 @@ export default function HomePage() {
                       <span className="size-2.5 rounded-full bg-[#27c93f]" />
                     </div>
                     <span className="font-mono text-[11.5px] text-[#9aa39b]">
-                      academy.golinux.app/beginner
+                      academy.golinux.app
                     </span>
                   </div>
 
                   <div className="space-y-2.5 p-5 font-mono text-[13px] leading-relaxed">
                     <p className="text-[11px] font-semibold tracking-wider text-[#c8f04a] uppercase">
-                      Mission · Level 04 · Hidden in Plain Sight
+                      Mission · Hidden in Plain Sight
                     </p>
                     <p>
                       <span className="text-[#c8f04a]">$</span> ls -la
@@ -470,7 +468,7 @@ export default function HomePage() {
                       <span className="text-[#c8f04a]">$</span> cat .note
                     </p>
                     <p className="text-[#9aa39b]">
-                      Nice find! Submit this secret to unlock Level 5:
+                      Nice find! Submit this secret to unlock the next challenge:
                     </p>
                     <p className="inline-block rounded-lg border border-[#c8f04a]/35 bg-[#c8f04a]/12 px-2.5 py-1 font-semibold text-[#c8f04a]">
                       GLAC-████-████-████-████
@@ -479,9 +477,9 @@ export default function HomePage() {
 
                   <div className="flex items-center justify-between border-t border-white/10 bg-white/[0.03] px-5 py-3 text-xs text-[#9aa39b]">
                     <span className="font-medium text-emerald-400">
-                      ✓ 33 levels · 5 stages · ∞ retries
+                      ✓ Interactive challenges · ∞ retries · Free
                     </span>
-                    <span className="font-mono text-[11px]">Alpine 3.21</span>
+                    <span className="font-mono text-[11px]">Alpine Linux</span>
                   </div>
                 </div>
               </div>
