@@ -11,17 +11,19 @@
  * Set GL_ASSET_ORIGIN to "" to serve everything from one origin (local dev with
  * a single server, or a fully self-hosted deploy).
  */
-const GL_VERSION = "v36";
+const GL_VERSION = "v37";
 
 /* Snapshot/device schema version. Increment whenever v86 device topology
  * (e.g. virtio_console, virtio_net, memory_size, OS image) changes so incompatible
  * saved OPFS states are never restored against a mismatched device/RAM layout. */
-const GL_STATE_SCHEMA = 4;
+const GL_STATE_SCHEMA = 5;
 
-/* Guest RAM and disk size in bytes. Must match tools/image/build-snapshot.sh (MEM_MB=128)
- * and tools/image/build.sh (DISK_SIZE=1G). */
+/* Guest RAM, VGA RAM, disk chunk size, and disk size in bytes. */
 const GL_MEMORY_SIZE = 128 * 1024 * 1024;
-const GL_DISK_SIZE = 1 * 1024 * 1024 * 1024;
+const GL_VGA_MEMORY_SIZE = 256 * 1024;
+const GL_CHUNK_SIZE = 64 * 1024;
+const GL_DISK_SIZE = 256 * 1024 * 1024;
+const GL_COALESCE_MAX_BYTES = 160 * 1024;
 
 /* Launch feature flags. Unstable/non-core features stay off until their tests
  * and invariants pass (see docs/stabilization/SCOPE.md). */
@@ -36,26 +38,24 @@ const GL_FEATURES = Object.freeze({
   network: false,        // dormant for now (adapter kept intact; flip to true to re-enable Net UI)
 });
 
-/* Authoritative app-shell file list, shared by sw.js (precache) and
- * tools/deploy/build-pages.sh (staging). Cold-fallback-only files
- * (debian-bzImage, debian-initrd, v86-fallback.wasm = ~15.3 MB) are omitted
- * from install precache so slow links boot ~85% faster; they still cache on
- * demand in GL_DATA_CACHE if ?nosnapshot is ever used. */
-const GL_SHELL_FILES = Object.freeze([
-  "./",
-  "index.html",
+/* Split app-shell file list:
+ *   - GL_CRITICAL_SHELL_FILES: minimal set needed to boot terminal & classify
+ *     chunks offline; precached during SW install.
+ *   - GL_DEFERRED_SHELL_FILES: landing/about pages, icons, legacy precache list,
+ *     and dormant net-adapter; cached best-effort after activation.
+ *   - GL_SHELL_FILES: full union for deploy staging and backwards compatibility.
+ */
+const GL_CRITICAL_SHELL_FILES = Object.freeze([
   "terminal.html",
   "styles.css",
-  "about.html",
-  "manifest.json",
   "packs-config.js",
   "packs.js",
   "persist.js",
   "persist-9p.js",
+  "js/sw-rescue.js",
   "js/main.js",
   "js/status.js",
   "js/boot.js",
-  "js/net-adapter.js",
   "js/net-ui.js",
   "js/chunk-fallback.js",
   "js/terminal.js",
@@ -65,6 +65,9 @@ const GL_SHELL_FILES = Object.freeze([
   "js/transfer.js",
   "js/tool-progress.js",
   "js/prefetch.js",
+  "js/settings.js",
+  "js/workspace-zip.js",
+  "js/palette.js",
   "assets/v86/libv86.js",
   "assets/v86/v86.wasm",
   "assets/xterm/xterm.js",
@@ -72,11 +75,24 @@ const GL_SHELL_FILES = Object.freeze([
   "assets/bios/seabios.bin",
   "assets/bios/vgabios.bin",
   "assets/empty-chunk.zst",
-  "chunks-precache.json",
   "bundles.json",
+]);
+
+const GL_DEFERRED_SHELL_FILES = Object.freeze([
+  "./",
+  "index.html",
+  "about.html",
+  "manifest.json",
+  "chunks-precache.json",
+  "js/net-adapter.js",
   "icons/favicon.svg",
   "icons/icon-192.png",
   "icons/icon-512.png",
+]);
+
+const GL_SHELL_FILES = Object.freeze([
+  ...GL_CRITICAL_SHELL_FILES,
+  ...GL_DEFERRED_SHELL_FILES,
 ]);
 
 /* Where chunks and packs live.
