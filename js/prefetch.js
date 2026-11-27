@@ -35,9 +35,11 @@ let statusText = "idle";
 let pendingQueue = null; // null = not built yet; Array<{ tool, chunk }> once scanned
 let onChange = () => {};
 
-function browserSaysSaveData() {
+function browserSaysFrugal() {
   const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-  return !!(c && c.saveData);
+  if (!c) return false;
+  if (c.saveData) return true;
+  return /^(slow-2g|2g)$/.test(c.effectiveType || "");
 }
 
 export function isAutoWarmEnabled() {
@@ -46,7 +48,7 @@ export function isAutoWarmEnabled() {
     if (v === "on") return true;
     if (v === "off") return false;
   } catch (_) {}
-  return !browserSaysSaveData();
+  return !browserSaysFrugal();
 }
 
 export function setAutoWarmEnabled(val) {
