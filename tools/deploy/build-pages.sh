@@ -20,6 +20,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 OUT="$ROOT/.deploy-pages"
 OVERRIDE_BUILD_ID=""
+SKIP_LANDING=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -27,6 +28,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "ERROR: --build-id requires a value" >&2; exit 2; }
       OVERRIDE_BUILD_ID="$2"
       shift 2
+      ;;
+    --skip-landing)
+      SKIP_LANDING=1
+      shift
       ;;
     -h|--help)
       sed -n '2,16p' "$0"; exit 0
@@ -40,6 +45,13 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+# Guard against destructive rm -rf on arbitrary paths (S-4).
+OUT_ABS="$(node -e 'const p=require("path"),fs=require("fs");const r=fs.realpathSync(process.argv[1]);const o=p.resolve(r,process.argv[2]);if(o===r||!o.startsWith(r+p.sep)){process.exit(1);}process.stdout.write(o);' "$ROOT" "$OUT")" || {
+  echo "ERROR: output directory '$OUT' must be a strict subdirectory inside $ROOT" >&2
+  exit 2
+}
+OUT="$OUT_ABS"
 
 # Cloudflare Workers static assets limits (verified 2026-11-23):
 #   - 25 MiB per file, all plans
@@ -77,10 +89,18 @@ rm -rf "$OUT"
 mkdir -p "$OUT/images" "$OUT/assets/xterm" "$OUT/assets/bios" "$OUT/assets/v86" "$OUT/icons"
 
 # Build and stage the Next.js landing page (index.html, about.html, _next/, SEO routes).
-echo "== Building Next.js landing page =="
-npm run build --prefix "$ROOT/landing"
+if [ "$SKIP_LANDING" -eq 1 ] && [ -f "$ROOT/landing/out/index.html" ]; then
+  echo "== Reusing existing Next.js landing/out (--skip-landing) =="
+else
+  echo "== Building Next.js landing page =="
+  npm run build --prefix "$ROOT/landing"
+fi
 if [ ! -f "$ROOT/landing/out/index.html" ]; then
   echo "ERROR: landing/out/index.html is missing after Next.js build." >&2
+  exit 1
+fi
+if [ ! -f "$ROOT/landing/out/404.html" ]; then
+  echo "ERROR: landing/out/404.html is missing after Next.js build." >&2
   exit 1
 fi
 cp -R "$ROOT/landing/out"/. "$OUT"/
@@ -124,8 +144,10 @@ if [ ! -f "$ROOT/bundles.json" ]; then
   exit 1
 fi
 cp "$ROOT/bundles.json" "$OUT"/bundles.json
-cp "$ROOT"/images/debian-bzImage "$ROOT"/images/debian-initrd \
-   "$ROOT"/images/debian-state.bin.zst "$ROOT"/images/build-id.json "$OUT/images/"
+cp "$ROOT"/images/debian-bzImage "$ROOT"/images/debian-state.bin.zst "$ROOT"/images/build-id.json "$OUT/images/"
+if [ -f "$ROOT/images/debian-initrd" ]; then
+  cp "$ROOT/images/debian-initrd" "$OUT/images/"
+fi
 if [ -n "$OVERRIDE_BUILD_ID" ]; then
   node -e '
     const fs = require("fs");
