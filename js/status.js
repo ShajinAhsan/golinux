@@ -68,6 +68,10 @@ export function showFatal(title, detail) {
   el.classList.add("visible");
   setStatus("cannot start");
   clearLoading();
+  const reloadBtn = $("fatalReload");
+  if (reloadBtn && typeof reloadBtn.focus === "function") {
+    try { reloadBtn.focus(); } catch (_) {}
+  }
 }
 
 export function showProgress(loaded, total, bps) {
@@ -128,7 +132,7 @@ export function setupStatusChrome() {
           new Promise((r) => setTimeout(r, 4000)),
         ]);
       }
-      try { sessionStorage.removeItem("gl_reloaded_for"); } catch (e) {}
+      try { sessionStorage.removeItem("golinux.reloaded_for"); } catch (e) {}
       location.reload();
     };
   }
@@ -365,7 +369,8 @@ export function handleDiskActivity(msg, { enabled = true, onNames, onBurstEnd } 
     burstBaseBytes = msg.bytes || 0;
     burstSamples = [];
     if (diskVisible && !diskHideTimer) {
-      diskHideTimer = setTimeout(() => hideDiskToast(onBurstEnd), DISK_HIDE_MS);
+      const delay = (msg.pending === 0 && (msg.inflightBytes || 0) === 0 && msg.idle) ? 80 : DISK_HIDE_MS;
+      diskHideTimer = setTimeout(() => { diskHideTimer = null; hideDiskToast(onBurstEnd); }, delay);
     } else if (!diskVisible && lasted < showDelay && onBurstEnd) {
       onBurstEnd();
     }
