@@ -554,6 +554,29 @@ async function testPureESModules() {
   check(st.fmtSpeed(2.5 * 1048576) === "2.5 MB/s", "status: fmtSpeed formats MB/s cleanly");
   check(st.fmtEta(42) === "~42s left", "status: fmtEta formats seconds cleanly");
   check(st.fmtEta(95) === "~1m 35s left", "status: fmtEta formats minutes+seconds cleanly");
+
+  const zipMod = await import(pathToFileURL(path.join(ROOT, "js/workspace-zip.js")).href);
+  check(zipMod.sanitizeZipRelPath("sub/hello.c") === "sub/hello.c", "zip: accepts clean relative path");
+  check(zipMod.sanitizeZipRelPath("../evil.sh") === null, "zip: rejects path traversal");
+  check(zipMod.sanitizeZipRelPath("/abs/path.txt") === "abs/path.txt", "zip: strips leading slash safely");
+  const zBytes = await zipMod.buildZipBytes([
+    { path: "hello.c", data: new TextEncoder().encode("int main(){return 0;}\n") },
+    { path: "nested/a.txt", data: new TextEncoder().encode("hi from nested\n") },
+  ]);
+  const zEntries = await zipMod.extractZipEntries(zBytes);
+  check(zEntries.length === 2 &&
+        zEntries[0].path === "hello.c" &&
+        new TextDecoder().decode(zEntries[1].data) === "hi from nested\n",
+    "zip: buildZipBytes + extractZipEntries round-trips cleanly");
+
+  const termMod = await import(pathToFileURL(path.join(ROOT, "js/terminal.js")).href);
+  check(termMod.decodeOsc52Payload("c;aGVsbG8=") === "hello", "terminal: decodeOsc52Payload decodes clipboard text");
+  check(termMod.decodeOsc52Payload("c;?") === null, "terminal: decodeOsc52Payload ignores query '?'");
+
+  const palMod = await import(pathToFileURL(path.join(ROOT, "js/palette.js")).href);
+  const shared = palMod.parseShareHash("#file=../../hi.c&code=" + Buffer.from("puts(\"ok\");").toString("base64url"));
+  check(shared && shared.file === "hi.c" && new TextDecoder().decode(shared.bytes) === "puts(\"ok\");",
+    "palette: parseShareHash sanitizes filename and decodes base64url code");
 }
 
 (async () => {
