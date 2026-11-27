@@ -31,6 +31,8 @@ import { setupTransferUI } from "./transfer.js";
 import { setupToolProgress } from "./tool-progress.js";
 import { handleIdleWarmResult, notifyDiskBusy, setupPrefetch } from "./prefetch.js";
 import { setNetAdapterGetter, setupNetUI } from "./net-ui.js";
+import { setupSettings, trapModalFocus } from "./settings.js";
+import { setupPalette } from "./palette.js";
 
 function applyFeatureFlags() {
   for (const el of document.querySelectorAll("[data-feature]")) {
@@ -71,6 +73,8 @@ function setupBarMenu() {
       mPacks: "openPacks",
       mUpload: "uploadBtn",
       mDownload: "downloadBtn",
+      mSettings: "settingsBtn",
+      mPalette: "paletteBtn",
       mReset: "resetBtn",
     }[item.id];
     if (target) {
@@ -180,6 +184,29 @@ function wireOfflineEvent() {
   });
 }
 
+let deferredInstallPrompt = null;
+
+function setupPwaInstall() {
+  const mInstall = document.getElementById("mInstall");
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    if (mInstall) mInstall.hidden = false;
+  });
+  window.addEventListener("appinstalled", () => {
+    deferredInstallPrompt = null;
+    if (mInstall) mInstall.hidden = true;
+  });
+  if (mInstall) {
+    mInstall.addEventListener("click", async () => {
+      if (!deferredInstallPrompt) return;
+      try { await deferredInstallPrompt.prompt(); } catch (_) {}
+      deferredInstallPrompt = null;
+      mInstall.hidden = true;
+    });
+  }
+}
+
 // ---------- startup ----------
 applyFeatureFlags();
 setupStatusChrome();
@@ -187,8 +214,11 @@ setupBarMenu();
 setupKeyBar();
 observeTerminal();
 setupPersistUI();
-const packsHooks = setupPacksUI();
-setupTransferUI();
+const packsHooks = setupPacksUI({ trapModalFocus });
+setupTransferUI({ trapModalFocus });
+setupSettings();
+setupPwaInstall();
+setupPalette({ trapModalFocus, getInstallPrompt: () => deferredInstallPrompt });
 setNetAdapterGetter(currentNetAdapter);
 setupNetUI();
 setupPrefetch({ onChange: (st) => packsHooks && packsHooks.refreshWarmState && packsHooks.refreshWarmState(st) });
