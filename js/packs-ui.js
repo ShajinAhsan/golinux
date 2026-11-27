@@ -61,7 +61,7 @@ function packSizes(states, manifest) {
   return bytes;
 }
 
-export function setupPacksUI() {
+export function setupPacksUI({ trapModalFocus } = {}) {
   if (!GL_FEATURES.packs || !window.GoPacks) {
     return { refreshBandwidth() {}, refreshWarmState() {} };
   }
@@ -356,9 +356,16 @@ export function setupPacksUI() {
     });
   }
 
+  let releaseFocus = null;
+  const closePacksModal = () => {
+    packsEl.classList.remove("visible");
+    if (releaseFocus) { releaseFocus(); releaseFocus = null; }
+  };
+
   if (openBtn) {
     openBtn.onclick = async () => {
       packsEl.classList.add("visible");
+      if (typeof trapModalFocus === "function") releaseFocus = trapModalFocus(packsEl);
       requestBwStatus();
       renderBandwidth();
       renderWarmState();
@@ -383,9 +390,12 @@ export function setupPacksUI() {
       await renderToolsGrid();
     };
   }
-  if (closeBtn) closeBtn.onclick = () => packsEl.classList.remove("visible");
+  if (closeBtn) closeBtn.onclick = closePacksModal;
   packsEl.addEventListener("click", (e) => {
-    if (e.target === packsEl) packsEl.classList.remove("visible");
+    if (e.target === packsEl) closePacksModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && isModalVisible()) closePacksModal();
   });
 
   packsEl.addEventListener("click", async (e) => {
