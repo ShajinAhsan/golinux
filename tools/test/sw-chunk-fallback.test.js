@@ -616,6 +616,50 @@ function testPageMessageContract() {
   check(/This version is out of date/i.test(mainJs), "(page) chunk-missing-real shows out-of-date fatal");
 }
 
+async function testCoalescedRangeAndBundlesFirst() {
+  const c0 = Buffer.alloc(16384, 0x11);
+  const c1 = Buffer.alloc(16384, 0x22);
+  const pad = Buffer.alloc(100 * 1024, 0x33);
+  const bundle = Buffer.concat([c0, c1, pad]);
+  const manifest = {
+    v: 1, buildId: "test", chunkSize: 131072,
+    files: ["b-coal-000.pack"],
+    entries: [
+      [0, 0, 0, c0.length],
+      [1, 0, c0.length, c1.length],
+      [2, 0, c0.length + c1.length, pad.length],
+    ],
+  };
+  const ranges = [];
+  const d = loadWorker({
+    fetchImpl: async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("bundles.json")) return new Response(JSON.stringify(manifest), { status: 200 });
+      if (url.endsWith("chunks-precache.json")) return new Response("", { status: 404 });
+      const rng = init && init.headers && (init.headers.Range || init.headers.range);
+      ranges.push(rng || null);
+      if (rng && rng.startsWith("bytes=")) {
+        const [a, b] = rng.slice(6).split("-").map(Number);
+        return new Response(bundle.subarray(a, b + 1), {
+          status: 206,
+          headers: { "Content-Length": String(b - a + 1) },
+        });
+      }
+      return new Response(bundle, { status: 200 });
+    },
+  });
+  await seedEmptyTemplate(d);
+  // Bundles-first empty check works even if chunks-precache.json 404s!
+  check((await d.GL.isEmptyChunkName(EMPTY_NAME)) === true,
+    "(bundles-first) identifies empty chunk from bundles.json without chunks-precache.json");
+
+  await d.sendMessage({ type: "set-bandwidth-mode", mode: "slow" });
+  await d.sendMessage({ type: "warm-chunks", priority: "tool", names: [REAL_LIST[0], REAL_LIST[1]] });
+  await new Promise((r) => setTimeout(r, 30));
+  check(ranges.length === 1 && ranges[0] === `bytes=0-${c0.length + c1.length - 1}`,
+    `(coalesce) adjacent slow-link tool chunks fetched in 1 coalesced Range (got ${ranges[0]})`);
+}
+
 (async () => {
   const tests = [
     testShellPrecacheIncludesManifestAndEmpty,
@@ -631,6 +675,7 @@ function testPageMessageContract() {
     testHybridBundleFetchDedupeAndOffline,
     testAdaptiveRangeStreamingAndPreemption,
     testPageMessageContract,
+    testCoalescedRangeAndBundlesFirst,
   ];
   for (const t of tests) {
     try { await t(); }
