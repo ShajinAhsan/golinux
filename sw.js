@@ -26,6 +26,12 @@ const GL_SW_STAMP = "dev";
 importScripts("packs-config.js");
 
 const SHELL_FILES = GL_SHELL_FILES;
+const CRITICAL_SHELL_FILES = typeof GL_CRITICAL_SHELL_FILES !== "undefined"
+  ? GL_CRITICAL_SHELL_FILES
+  : SHELL_FILES;
+const DEFERRED_SHELL_FILES = typeof GL_DEFERRED_SHELL_FILES !== "undefined"
+  ? GL_DEFERRED_SHELL_FILES
+  : [];
 
 // Matches both flat local dev paths and build-id versioned production paths.
 const CHUNK_RE = /\/debian-chunks\/(?:[^/]+\/)?chunk-\d+-\d+\.zst$/;
@@ -53,11 +59,11 @@ self.addEventListener("install", (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(GL_SHELL_CACHE);
     const results = await Promise.allSettled(
-      SHELL_FILES.map((f) => cache.add(new Request(f, { cache: "reload" })))
+      CRITICAL_SHELL_FILES.map((f) => cache.add(new Request(f, { cache: "default" })))
     );
 
     const failed = results
-      .map((r, i) => (r.status === "rejected" ? SHELL_FILES[i] : null))
+      .map((r, i) => (r.status === "rejected" ? CRITICAL_SHELL_FILES[i] : null))
       .filter(Boolean);
 
     if (failed.length) {
@@ -77,8 +83,16 @@ self.addEventListener("activate", (event) => {
     }
     if (IS_LOCAL_HOST) keep.add(GL_CONFIG_CACHE);
     const names = await caches.keys();
-    await Promise.all(names.filter((n) => !keep.has(n)).map((n) => caches.delete(n)));
+    await Promise.all(names.filter((n) => !keep.has(n) && !n.startsWith("golinux-snap-part-")).map((n) => caches.delete(n)));
     await self.clients.claim();
+    // Best-effort deferred precache of non-critical shell files (never blocks or bricks boot).
+    if (DEFERRED_SHELL_FILES.length) {
+      caches.open(GL_SHELL_CACHE).then((cache) =>
+        Promise.allSettled(DEFERRED_SHELL_FILES.map((f) =>
+          cache.match(f, { ignoreSearch: true }).then((hit) => hit || cache.add(new Request(f, { cache: "default" })))
+        ))
+      ).catch(() => {});
+    }
     broadcast({
       type: "sw-activated",
       version: GL_VERSION,
@@ -309,11 +323,18 @@ async function readBodyWithProgress(response, onDelta) {
 /** Unpack a complete .pack ArrayBuffer into GL_DATA_CACHE and return Map<name, ArrayBuffer>. */
 async function unpackBundleBuffer(file, buf, pathnamePrefix) {
   const idx = await loadBundleIndex();
+  const expectedSize = (idx && idx.bundleSizes && idx.bundleSizes.get(file)) || 0;
+  if (expectedSize > 0 && buf.byteLength < expectedSize) {
+    throw new Error(`bundle ${file} truncated: got ${buf.byteLength}, expected ${expectedSize}`);
+  }
   const members = (idx && idx.bundleToChunks.get(file)) || [];
   const cache = await caches.open(GL_DATA_CACHE).catch(() => null);
   const map = new Map();
   const puts = [];
   for (const m of members) {
+    if (m.off + m.len > buf.byteLength) {
+      throw new Error(`bundle ${file} slice out of bounds for ${m.name}`);
+    }
     const slice = buf.slice(m.off, m.off + m.len);
     map.set(m.name, slice);
     if (cache) {
@@ -480,10 +501,15 @@ function shouldUseRange(bMeta, idx) {
 }
 
 /**
- * True ONLY when chunks-precache.json is loaded and does not contain `name`.
- * When unavailable, returns false (assume real; never paper over real data).
+ * True when the requested chunk is known to be zeroed (not in bundles.json,
+ * or not in chunks-precache.json when bundles.json is unavailable).
+ * When neither index is available, returns false (assume real; never paper over real data).
  */
 async function isEmptyChunkName(name) {
+  const idx = bundleIndex || (await loadBundleIndex());
+  if (idx && idx.chunkToBundle && idx.chunkToBundle.size > 0) {
+    return !idx.chunkToBundle.has(name);
+  }
   const set = realChunkSet || (await loadRealChunks());
   if (!set) return false;
   return !set.has(name);
@@ -494,7 +520,7 @@ async function headFromCache(key, cacheNames) {
   for (const name of cacheNames) {
     const cache = await caches.open(name);
     const hit = await cache.match(key, { ignoreSearch: true });
-    if (hit) {
+    if (hit && hit.ok) {
       const len = hit.headers.get("Content-Length");
       return new Response(null, {
         status: 200,
@@ -719,6 +745,70 @@ async function isChunkCached(name, pathnamePrefix) {
   return false;
 }
 
+const COALESCE_GAP_BYTES = 8192;
+
+async function fetchCoalescedRange(file, members, pathnamePrefix, opts) {
+  const bg = !!(opts && opts.background);
+  if (inflightBundles.has(file)) return inflightBundles.get(file);
+
+  const sorted = members.slice().sort((a, b) => a.off - b.off);
+  const start = sorted[0].off;
+  const last = sorted[sorted.length - 1];
+  const end = last.off + last.len;
+  const spanLen = end - start;
+  const bundleUrl = glBundleUrl(file);
+  const rangeHeader = `bytes=${start}-${end - 1}`;
+  const fetchStart = Date.now();
+  const trigger = sorted[0].name;
+  let streamed = 0;
+
+  if (!bg) beginDiskRead(trigger);
+  try {
+    const response = await fetch(bundleUrl, { headers: { Range: rangeHeader } });
+    if (!response.ok) {
+      if (!bg) endDiskRead(false, 0, trigger, streamed, trigger);
+      return { status: response.status };
+    }
+    const buf = await readBodyWithProgress(response, (d) => {
+      streamed += d;
+      if (!bg) progressDiskRead(d);
+    });
+    if (response.status === 200 && buf.byteLength >= end) {
+      await unpackBundleBuffer(file, buf, pathnamePrefix);
+      noteThroughput(buf.byteLength, Math.max(1, Date.now() - fetchStart));
+      if (!bg) endDiskRead(true, buf.byteLength, sorted.map((m) => m.name), streamed, trigger);
+      return { status: 200 };
+    }
+    if (response.status === 206 && buf.byteLength === spanLen) {
+      const cache = await caches.open(GL_DATA_CACHE).catch(() => null);
+      const puts = [];
+      for (const m of sorted) {
+        const relOff = m.off - start;
+        const slice = buf.slice(relOff, relOff + m.len);
+        if (cache) {
+          const key = new Request(self.location.origin + pathnamePrefix + m.name, { method: "GET" });
+          puts.push(cache.put(key, new Response(slice, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/zstd",
+              "Content-Length": String(slice.byteLength),
+            },
+          })).catch(() => {}));
+        }
+      }
+      if (puts.length) await Promise.all(puts);
+      noteThroughput(buf.byteLength, Math.max(1, Date.now() - fetchStart));
+      if (!bg) endDiskRead(true, buf.byteLength, sorted.map((m) => m.name), streamed, trigger);
+      return { status: 200 };
+    }
+    if (!bg) endDiskRead(false, 0, trigger, streamed, trigger);
+    return { status: 502 };
+  } catch (e) {
+    if (!bg) endDiskRead(false, 0, trigger, streamed, trigger);
+    return { status: 0, error: e };
+  }
+}
+
 async function warmChunkOne(name, opts) {
   await assetBaseReady;
   const pathnamePrefix = "/" + GL_CHUNK_PATH;
@@ -733,16 +823,67 @@ async function warmChunkOne(name, opts) {
   return fetchAndUnpackBundle(bMeta.file, name, pathnamePrefix, opts);
 }
 
-function drainToolWarmQueue() {
-  while (toolWarmActive < 2 && toolWarmQueue.length > 0) {
-    const name = toolWarmQueue.shift();
-    if (!name) continue;
-    toolWarmActive++;
-    warmChunkOne(name, { background: true }).catch(() => {}).finally(() => {
-      toolWarmActive--;
-      if (toolWarmQueue.length > 0) drainToolWarmQueue();
-    });
+async function warmToolBatch(names) {
+  await assetBaseReady;
+  const pathnamePrefix = "/" + GL_CHUNK_PATH;
+  const idx = await loadBundleIndex();
+  if (!idx || !isSlowLink()) {
+    for (const n of names) {
+      await warmChunkOne(n, { background: true }).catch(() => {});
+    }
+    return;
   }
+
+  const maxSpan = typeof GL_COALESCE_MAX_BYTES === "number" ? GL_COALESCE_MAX_BYTES : (160 * 1024);
+  const byFile = new Map();
+  for (const n of names) {
+    if (await isChunkCached(n, pathnamePrefix)) continue;
+    if (await isEmptyChunkName(n)) continue;
+    const bMeta = idx.chunkToBundle.get(n);
+    if (!bMeta) continue;
+    if (!shouldUseRange(bMeta, idx)) {
+      await fetchAndUnpackBundle(bMeta.file, n, pathnamePrefix, { background: true }).catch(() => {});
+      continue;
+    }
+    if (!byFile.has(bMeta.file)) byFile.set(bMeta.file, []);
+    byFile.get(bMeta.file).push({ name: n, off: bMeta.off, len: bMeta.len });
+  }
+
+  for (const [file, items] of byFile) {
+    items.sort((a, b) => a.off - b.off);
+    let group = [items[0]];
+    for (let i = 1; i < items.length; i++) {
+      const prev = group[group.length - 1];
+      const cur = items[i];
+      const gap = cur.off - (prev.off + prev.len);
+      const span = (cur.off + cur.len) - group[0].off;
+      if (gap >= 0 && gap <= COALESCE_GAP_BYTES && span <= maxSpan) {
+        group.push(cur);
+      } else {
+        if (group.length >= 2) {
+          await fetchCoalescedRange(file, group, pathnamePrefix, { background: true });
+        } else {
+          await fetchChunkRange({ file, off: group[0].off, len: group[0].len }, group[0].name, pathnamePrefix, { background: true });
+        }
+        group = [cur];
+      }
+    }
+    if (group.length >= 2) {
+      await fetchCoalescedRange(file, group, pathnamePrefix, { background: true });
+    } else if (group.length === 1) {
+      await fetchChunkRange({ file, off: group[0].off, len: group[0].len }, group[0].name, pathnamePrefix, { background: true });
+    }
+  }
+}
+
+function drainToolWarmQueue() {
+  if (toolWarmActive > 0 || toolWarmQueue.length === 0) return;
+  const batch = toolWarmQueue.splice(0, 4);
+  toolWarmActive++;
+  warmToolBatch(batch).catch(() => {}).finally(() => {
+    toolWarmActive--;
+    if (toolWarmQueue.length > 0) drainToolWarmQueue();
+  });
 }
 
 /* ---------- persistent /root unload handoff (survives page refresh/close) ---------- */
@@ -1084,9 +1225,9 @@ self.addEventListener("fetch", (event) => {
   const isChunk = CHUNK_RE.test(url.pathname);
   const isPackList = /\/packs\//.test(url.pathname);
 
-  // Never cache pack/tool JSON lists in GL_SHELL_CACHE: let browser/CDN honor
-  // R2's Cache-Control (or the caller's cache: "no-store").
+  // Never cache pack/tool JSON lists or same-origin API routes in GL_SHELL_CACHE.
   if (isPackList) return;
+  if (sameOrigin && url.pathname.startsWith("/api/")) return;
 
   if (!sameOrigin && !isChunk) return;
 
