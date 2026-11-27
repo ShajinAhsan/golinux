@@ -28,12 +28,14 @@ let failed = false;
 const fail = (msg) => { failed = true; console.error("FAIL: " + msg); };
 const pass = (msg) => console.log("ok: " + msg);
 
+const initrdPath = path.join(ROOT, "images", "debian-initrd");
+const hasInitrd = fs.existsSync(initrdPath);
 const emulator = new V86({
   wasm_path: path.join(ROOT, "assets", "v86", "v86.wasm"),
   bios: { url: path.join(ROOT, "assets", "bios", "seabios.bin") },
   vga_bios: { url: path.join(ROOT, "assets", "bios", "vgabios.bin") },
   bzimage: { url: path.join(ROOT, "images", "debian-bzImage") },
-  initrd: { url: path.join(ROOT, "images", "debian-initrd") },
+  ...(hasInitrd ? { initrd: { url: initrdPath } } : {}),
   hda: {
     url: path.join(ROOT, "images", "debian.img"),
     async: true,
@@ -41,7 +43,10 @@ const emulator = new V86({
   },
   filesystem: {},
   net_device: { type: "virtio" },
-  cmdline: "root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0",
+  cmdline: hasInitrd
+    ? "root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0"
+    : "root=/dev/sda rootfstype=squashfs ro init=/sbin/init-overlay mitigations=off console=ttyS0",
+  ...(hasInitrd ? {} : { vga_memory_size: 256 * 1024 }),
   memory_size: 128 * 1024 * 1024,
   autostart: true,
 });
