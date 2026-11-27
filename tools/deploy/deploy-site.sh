@@ -50,11 +50,27 @@ BUILD_ID="$(node -e 'process.stdout.write(require(process.argv[1]).buildId)' \
   "$ROOT/images/build-id.json")"
 [ -n "$BUILD_ID" ] || die "build id is empty"
 
-SW_SHA="$(shasum -a 256 "$OUT/sw.js" | cut -d' ' -f1)"
-INDEX_SHA="$(shasum -a 256 "$OUT/index.html" | cut -d' ' -f1)"
-TERMINAL_SHA="$(shasum -a 256 "$OUT/terminal.html" | cut -d' ' -f1)"
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  else
+    sha256sum "$1" | cut -d' ' -f1
+  fi
+}
+
+dir_bytes() {
+  if stat -f%z "$OUT/sw.js" >/dev/null 2>&1; then
+    find "$1" -type f -exec stat -f%z {} + | awk '{s+=$1} END {print s+0}'
+  else
+    find "$1" -type f -exec stat -c%s {} + | awk '{s+=$1} END {print s+0}'
+  fi
+}
+
+SW_SHA="$(sha256_of "$OUT/sw.js")"
+INDEX_SHA="$(sha256_of "$OUT/index.html")"
+TERMINAL_SHA="$(sha256_of "$OUT/terminal.html")"
 FILE_COUNT="$(find "$OUT" -type f | wc -l | tr -d ' ')"
-TOTAL_BYTES="$(find "$OUT" -type f -exec stat -f%z {} + | awk '{s+=$1} END {print s+0}')"
+TOTAL_BYTES="$(dir_bytes "$OUT")"
 TOTAL_MB="$(awk -v b="$TOTAL_BYTES" 'BEGIN {printf "%.2f", b/1048576}')"
 
 echo
@@ -89,6 +105,15 @@ echo "  authenticated."
 # 3. Confirm.
 # ---------------------------------------------------------------------------
 echo
+check_404_page() {
+  local url="$SITE_URL/this-route-does-not-exist?cb=$(cb)"
+  local hdr code ctype
+  hdr="$(curl -sSD - -m 20 -o /dev/null "$url" | tr -d '\r')" || return 1
+  code="$(printf '%s\n' "$hdr" | awk '/^HTTP\// {c=$2} END {print c}')"
+  ctype="$(printf '%s\n' "$hdr" | awk -F': ' 'tolower($1)=="content-type" {print tolower($2)}' | tail -n 1)"
+  [ "$code" = "404" ] && case "$ctype" in *text/html*) true ;; *) false ;; esac
+}
+
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "DRY RUN: would now ask: Deploy build $BUILD_ID to golinux.app? [y/N]"
   echo "DRY RUN: would run: npx wrangler deploy"
@@ -143,7 +168,7 @@ check_terminal_sha() {
   local tmp; tmp="$(mktemp)"
   local code
   code="$(curl -sSL -m 20 -o "$tmp" -w '%{http_code}' "$TERMINAL_URL/?cb=$(cb)")" || { rm -f "$tmp"; return 1; }
-  local live; live="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
+  local live; live="$(sha256_of "$tmp")"
   local bytes; bytes="$(wc -c < "$tmp" | tr -d ' ')"
   rm -f "$tmp"
   if [ "$code" != "200" ] || [ "$live" != "$TERMINAL_SHA" ]; then
@@ -155,7 +180,7 @@ check_terminal_sha() {
 check_sw_sha() {
   local tmp; tmp="$(mktemp)"
   fetch "$TERMINAL_URL/sw.js?cb=$(cb)" "$tmp" || { rm -f "$tmp"; return 1; }
-  local live; live="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
+  local live; live="$(sha256_of "$tmp")"
   rm -f "$tmp"
   [ "$live" = "$SW_SHA" ]
 }
@@ -165,7 +190,7 @@ check_index_sha() {
   # Fetch "/" (Cloudflare Workers Static Assets redirects /index.html -> / with 308).
   local code
   code="$(curl -sSL -m 20 -o "$tmp" -w '%{http_code}' "$SITE_URL/?cb=$(cb)")" || { rm -f "$tmp"; return 1; }
-  local live; live="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
+  local live; live="$(sha256_of "$tmp")"
   local bytes; bytes="$(wc -c < "$tmp" | tr -d ' ')"
   rm -f "$tmp"
   if [ "$code" != "200" ] || [ "$live" != "$INDEX_SHA" ]; then
@@ -227,6 +252,15 @@ check_one_bundle() {
   [ "$code" = "200" ] && [ "$cors" = "$TERMINAL_URL" ]
 }
 
+check_404_page() {
+  local url="$SITE_URL/this-route-does-not-exist?cb=$(cb)"
+  local hdr code ctype
+  hdr="$(curl -sSD - -m 20 -o /dev/null "$url" | tr -d '\r')" || return 1
+  code="$(printf '%s\n' "$hdr" | awk '/^HTTP\// {c=$2} END {print c}')"
+  ctype="$(printf '%s\n' "$hdr" | awk -F': ' 'tolower($1)=="content-type" {print tolower($2)}' | tail -n 1)"
+  [ "$code" = "404" ] && case "$ctype" in *text/html*) true ;; *) false ;; esac
+}
+
 if [ "$DRY_RUN" -eq 1 ]; then
   echo
   echo "DRY RUN: would now verify $SITE_URL and $TERMINAL_URL against this build."
@@ -244,6 +278,7 @@ retry "chunks-precache.json returns 200" 6 check_precache_200 || FAILED=1
 retry "sw.js Cache-Control is no-cache and not concatenated" 6 check_sw_cache_control || FAILED=1
 retry "packs/$BUILD_ID/tools.json returns 200 with CORS for $TERMINAL_URL" 6 check_tools_json || FAILED=1
 retry "a real hybrid bundle on the asset origin returns 200 with CORS for $TERMINAL_URL" 6 check_one_bundle || FAILED=1
+retry "unknown route returns HTTP 404 with text/html error page" 6 check_404_page || FAILED=1
 
 echo
 if [ "$FAILED" -ne 0 ]; then
