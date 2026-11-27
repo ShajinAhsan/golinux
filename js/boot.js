@@ -548,7 +548,7 @@ export async function bootMachine() {
     } else {
       setStatus("downloading…");
       let tipIdx = 0;
-      setLoading("Downloading the machine", "Resumable ~9 MB snapshot (cached locally after first load).");
+      setLoading("Downloading the machine", "Resumable ~5.1 MB snapshot (cached locally after first load).");
       showProgress(0, 0);
       tipTimer = setInterval(() => {
         tipIdx = (tipIdx + 1) % QUICK_TIPS.length;
