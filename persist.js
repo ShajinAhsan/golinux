@@ -380,7 +380,26 @@
       throw new Error("DecompressionStream unsupported in this browser");
     }
     const ds = new DecompressionStream("gzip");
-    return new Response(new Blob([buffer]).stream().pipeThrough(ds)).arrayBuffer();
+    const stream = new Blob([buffer]).stream().pipeThrough(ds);
+    const reader = stream.getReader();
+    const parts = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength) {
+        total += value.byteLength;
+        if (total > SIZE_MAX_BYTES) {
+          try { await reader.cancel(); } catch (_) {}
+          throw new Error("Decompressed /root archive exceeds size limit");
+        }
+        parts.push(value);
+      }
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) { out.set(p, off); off += p.byteLength; }
+    return out.buffer;
   }
 
   async function withStateLock(fn) {
