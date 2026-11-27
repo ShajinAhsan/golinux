@@ -2,6 +2,7 @@
   "name": "GoLinux",
   "short_name": "GoLinux",
   "description": "Ultra-lightweight Alpine Linux 3.21 (x86) with BusyBox & TinyCC, emulated in the browser with v86.",
+  "id": "./terminal.html",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
