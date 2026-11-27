@@ -16,9 +16,10 @@ const path = require("node:path");
 const ROOT = path.join(__dirname, "..", "..");
 const { V86 } = require(path.join(ROOT, "assets/v86/libv86.js"));
 
-const CHUNK_SIZE = 128 * 1024;
+const CHUNK_SIZE = Number(process.env.CHUNK_SIZE_BYTES || (128 * 1024));
 const DISK_BYTES = fs.statSync(path.join(ROOT, "images/debian.img")).size;
 const MODE = process.argv[2] || "common";
+const NEXTGEN = process.env.NEXTGEN_SQUASHFS === "1";
 
 // The tools whose read footprint makes up the "common" pack.
 const COMMON_COMMANDS = [
@@ -80,10 +81,13 @@ function wrapRecording(recording) {
   // Always create a fresh per-run clone so an image rebuild can never silently
   // reuse a stale /tmp recording image.
   try {
-    require("node:child_process").execFileSync("cp", ["-c", src, copy]);
+    require("node:child_process").execFileSync("cp", ["-c", src, copy], { stdio: "ignore" });
   } catch (e) {
-    console.error("[packs] clone failed, falling back to a full copy");
-    fs.copyFileSync(src, copy);
+    try {
+      require("node:child_process").execFileSync("cp", ["--reflink=auto", src, copy], { stdio: "ignore" });
+    } catch (e2) {
+      fs.copyFileSync(src, copy);
+    }
   }
 
   const fd = fs.openSync(copy, "r+");
@@ -131,20 +135,24 @@ const recording = { on: false };
 let text = "";
 let phase = 0;
 
-const emulator = new V86({
+const INITRD_PATH = path.join(ROOT, "images/debian-initrd");
+const v86Opts = {
   wasm_path: path.join(ROOT, "assets/v86/v86.wasm"),
   bios: { url: path.join(ROOT, "assets/bios/seabios.bin") },
   vga_bios: { url: path.join(ROOT, "assets/bios/vgabios.bin") },
   bzimage: { url: path.join(ROOT, "images/debian-bzImage") },
-  initrd: { url: path.join(ROOT, "images/debian-initrd") },
-  // Real disk bytes, read through a recording wrapper so we see exactly which
-  // chunks the tools touch. Boot-time reads happen before recording is enabled.
   hda: wrapRecording(recording),
   net_device: { type: "virtio" },
-  cmdline: "root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0",
+  cmdline: NEXTGEN
+    ? "root=/dev/sda rootfstype=squashfs ro init=/sbin/init-overlay mitigations=off console=ttyS0"
+    : "root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0",
   memory_size: 128 * 1024 * 1024,
   autostart: true,
-});
+};
+if (!NEXTGEN && fs.existsSync(INITRD_PATH)) {
+  v86Opts.initrd = { url: INITRD_PATH };
+}
+const emulator = new V86(v86Opts);
 
 emulator.add_listener("serial0-output-byte", byte => {
   text += String.fromCharCode(byte);
