@@ -19,7 +19,9 @@ const OUT = process.argv[3] || path.join(ROOT, "images/debian-state.bin");
 const BOOT_TIMEOUT_MS = Number(process.env.BOOT_TIMEOUT_MS || 120000);
 const FILL_MB = Number(process.env.FILL_MB || Math.max(64, MEM_MB - 36));
 const DISK_BYTES = fs.statSync(path.join(ROOT, "images/debian.img")).size;
-const CMDLINE_EXTRA = "init_on_free=1 init_on_alloc=1";
+const NEXTGEN = process.env.NEXTGEN_SQUASHFS === "1";
+const VGA_KB = Number(process.env.VGA_KB || (NEXTGEN ? 256 : 8192));
+const CMDLINE_EXTRA = NEXTGEN ? "mitigations=off quiet" : "init_on_free=1 init_on_alloc=1";
 
 const MOTD_LINES = [
   "",
@@ -59,12 +61,13 @@ const serial = { text: "" };
 const hvc = { text: "" };
 let phase = 0; // 0=booting -> 1=binding 9p /root & respawning hvc0 -> 2=verifying & prepping -> 3=saving
 
-const emulator = new V86({
+const INITRD_PATH = path.join(ROOT, "images/debian-initrd");
+const v86Opts = {
   wasm_path: path.join(ROOT, "assets/v86/v86.wasm"),
   bios: { url: path.join(ROOT, "assets/bios/seabios.bin") },
   vga_bios: { url: path.join(ROOT, "assets/bios/vgabios.bin") },
+  vga_memory_size: VGA_KB * 1024,
   bzimage: { url: path.join(ROOT, "images/debian-bzImage") },
-  initrd: { url: path.join(ROOT, "images/debian-initrd") },
   hda: {
     url: path.join(ROOT, "images/debian.img"),
     async: true,
@@ -74,10 +77,16 @@ const emulator = new V86({
   virtio_console: true,
   net_device: { type: "virtio" },
   preserve_mac_from_state_image: true,
-  cmdline: `root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0 ${CMDLINE_EXTRA}`,
+  cmdline: NEXTGEN
+    ? `root=/dev/sda rootfstype=squashfs ro init=/sbin/init-overlay console=ttyS0 ${CMDLINE_EXTRA}`
+    : `root=/dev/sda rootfstype=ext4 modules=sd-mod,ext4 rw console=ttyS0 ${CMDLINE_EXTRA}`,
   memory_size: MEM_MB * 1024 * 1024,
   autostart: true,
-});
+};
+if (!NEXTGEN && fs.existsSync(INITRD_PATH)) {
+  v86Opts.initrd = { url: INITRD_PATH };
+}
+const emulator = new V86(v86Opts);
 
 const started = Date.now();
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, "");
@@ -101,11 +110,11 @@ function maybeBindHost9p() {
     "mkdir -p /run/host9p/root /run/host9p/host",
     "chmod 0700 /run/host9p/root",
     "chmod 0755 /run/host9p/host",
-    "cp -a /root/. /run/host9p/root/",
+    "(mountpoint -q /root || cp -a /root/. /run/host9p/root/)",
     "(mountpoint -q /root || mount --bind /run/host9p/root /root)",
     "(mountpoint -q /mnt/host || mount --bind /run/host9p/host /mnt/host)",
     "HVC_PID=$(for p in /proc/[0-9]*; do [ -r $p/comm ] && [ \"$(cat $p/comm)\" = bash ] && [ \"$(readlink $p/fd/0 2>/dev/null)\" = /dev/hvc0 ] && basename $p && break; done)",
-    "[ -n \"$HVC_PID\" ] && kill -9 $HVC_PID 2>/dev/null || true",
+    "([ -n \"$HVC_PID\" ] && kill -9 $HVC_PID 2>/dev/null || true)",
     "printf 'BIND_9P_%s\\n' READY",
   ].join(" && ");
   emulator.serial0_send(bindCmd + "\n");
