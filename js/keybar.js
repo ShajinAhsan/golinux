@@ -71,6 +71,14 @@ export function setLatched(which, on) {
   if (which === "alt") latchedAlt = !!on;
   const btn = document.querySelector(`#keybar [data-act="${which}"]`);
   if (btn) btn.setAttribute("aria-pressed", String(!!on));
+  const hint = document.getElementById("kbLatchHint");
+  if (hint) {
+    const parts = [];
+    if (latchedCtrl) parts.push("Ctrl+");
+    if (latchedAlt) parts.push("Alt+");
+    hint.textContent = parts.join("");
+    hint.hidden = parts.length === 0;
+  }
 }
 
 export function clearLatches() {
@@ -309,6 +317,26 @@ export function handleKeyButton(btn) {
     return;
   }
 
+  if (act === "copy") {
+    const term = currentTerminal();
+    const sel = term && typeof term.getSelection === "function" ? term.getSelection() : "";
+    if (sel && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      navigator.clipboard.writeText(sel).catch(() => {});
+      btn.textContent = "Copied";
+      setTimeout(() => { btn.textContent = "Copy"; }, 1000);
+    }
+    return;
+  }
+
+  if (act === "paste") {
+    if (navigator.clipboard && typeof navigator.clipboard.readText === "function") {
+      navigator.clipboard.readText().then((txt) => {
+        if (txt) sendToTerm(txt, false);
+      }).catch(() => {});
+    }
+    return;
+  }
+
   if (act === "more") {
     const extra = document.querySelector("#keybar .kb-extra");
     if (!extra) return;
@@ -370,4 +398,6 @@ export function setupKeyBar() {
     e.preventDefault();
     handleKeyButton(btn);
   });
+
+  window.addEventListener("blur", () => clearLatches());
 }
