@@ -19,9 +19,12 @@ MEM_MB="${MEM_MB:-128}"
 RAW="$IMAGES/debian-state.bin"
 OUT="$IMAGES/debian-state.bin.zst"
 
-for f in debian-bzImage debian-initrd debian.img; do
+for f in debian-bzImage debian.img; do
   [ -f "$IMAGES/$f" ] || { echo "missing $IMAGES/$f — run tools/image/build.sh first" >&2; exit 1; }
 done
+if [ "${NEXTGEN_SQUASHFS:-0}" != "1" ] && [ ! -f "$IMAGES/debian-initrd" ]; then
+  echo "missing $IMAGES/debian-initrd — run tools/image/build.sh first" >&2; exit 1
+fi
 
 # The snapshot is prepared for size (see save-state.js for the reasoning and
 # tools/image/profile-state.js for the measurement):
@@ -46,7 +49,7 @@ BOOT_TIMEOUT_MS="${BOOT_TIMEOUT_MS:-180000}" \
   node "$DIR/save-state.js" "$MEM_MB" "$RAW"
 
 echo "== Compressing =="
-zstd -19 -T0 -f "$RAW" -o "$OUT"
+zstd --ultra -22 -T0 -f "$RAW" -o "$OUT"
 rm -f "$RAW"
 
 echo "== Refreshing build id (invalidates saved user states) =="
