@@ -36,7 +36,7 @@ const TOOLS_PATH = path.join(ROOT, "packs", "tools.json");
 const BUILD_ID_PATH = path.join(ROOT, "images", "build-id.json");
 const OUT_INDEX = path.join(ROOT, "bundles.json");
 
-const CHUNK_SIZE = 128 * 1024;
+const CHUNK_SIZE = Number(process.env.CHUNK_SIZE_BYTES || (128 * 1024));
 const CHUNK_RE = /^chunk-(\d+)-(\d+)\.zst$/;
 
 // Ordered tiers: earlier tiers claim shared chunks first. Capped at 512-640 KB
