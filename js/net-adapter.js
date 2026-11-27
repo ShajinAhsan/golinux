@@ -113,7 +113,7 @@ function isBlockedIpv6(host) {
   if (raw.startsWith("fc") || raw.startsWith("fd")) return true; // ULA fc00::/7
   if (/^fe[89ab]/.test(raw)) return true;                        // link-local fe80::/10
   if (raw.startsWith("ff")) return true;                         // multicast
-  if (raw.startsWith("::ffff:")) return true;                    // IPv4-mapped (block conservatively)
+  if (raw.startsWith("::ffff:") || raw.startsWith("::0:") || raw.startsWith("64:ff9b:") || raw.startsWith("2002:")) return true;
   if (raw.startsWith("0:0:0:0:0:0:0:0") || raw.startsWith("0:0:0:0:0:0:0:1")) return true;
   return false;
 }
@@ -1014,22 +1014,68 @@ class VirtualHttpConnection {
     this.abortController = new AbortController();
     this.resetFetchTimeout();
 
-    const init = {
-      method: this.reqMeta.method,
-      headers: this.reqMeta.headers,
-      credentials: "omit",
-      referrerPolicy: "no-referrer",
-      mode: "cors",
-      redirect: "follow",
-      signal: this.abortController.signal,
-    };
-    if (bodyBytes && bodyBytes.length > 0 && this.reqMeta.method !== "GET" && this.reqMeta.method !== "HEAD") {
-      init.body = bodyBytes;
-    }
+    let currentUrl = this.reqMeta.url;
+    let currentMethod = this.reqMeta.method;
+    let currentHeaders = this.reqMeta.headers;
+    let currentBody = (bodyBytes && bodyBytes.length > 0 && currentMethod !== "GET" && currentMethod !== "HEAD")
+      ? bodyBytes
+      : null;
 
     try {
-      const res = await this.adapter.fetchImpl(this.reqMeta.url, init);
-      if (this.closed) return;
+      let res = null;
+      const MAX_REDIRECTS = 4;
+      for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+        const init = {
+          method: currentMethod,
+          headers: currentHeaders,
+          credentials: "omit",
+          referrerPolicy: "no-referrer",
+          mode: "cors",
+          redirect: "manual",
+          signal: this.abortController.signal,
+        };
+        if (currentBody && currentMethod !== "GET" && currentMethod !== "HEAD") {
+          init.body = currentBody;
+        }
+        res = await this.adapter.fetchImpl(currentUrl, init);
+        if (this.closed) return;
+
+        if (res.type === "opaqueredirect") {
+          this.respondTextAndClose(502, "Bad Gateway", "GoLinux network: opaque cross-origin redirect blocked for safety.");
+          return;
+        }
+        if (res.status >= 300 && res.status < 400) {
+          const loc = res.headers && typeof res.headers.get === "function" ? res.headers.get("location") : "";
+          if (!loc) break;
+          if (hop === MAX_REDIRECTS) {
+            this.respondTextAndClose(502, "Bad Gateway", "GoLinux network: too many redirects.");
+            return;
+          }
+          let resolved;
+          try {
+            resolved = new URL(loc, currentUrl).href;
+          } catch (_) {
+            this.respondTextAndClose(502, "Bad Gateway", "GoLinux network: malformed redirect Location.");
+            return;
+          }
+          const redirCheck = validateTargetUrl(resolved, this.adapter.urlOpts);
+          if (!redirCheck.ok) {
+            this.respondTextAndClose(redirCheck.status, redirCheck.status === 403 ? "Forbidden" : "Bad Request", redirCheck.reason);
+            return;
+          }
+          currentUrl = redirCheck.url;
+          if (res.status === 303 || ((res.status === 301 || res.status === 302) && currentMethod === "POST")) {
+            currentMethod = "GET";
+            currentBody = null;
+            currentHeaders = new Headers(currentHeaders);
+            currentHeaders.delete("content-type");
+            currentHeaders.delete("content-length");
+          }
+          continue;
+        }
+        break;
+      }
+      if (!res) throw new Error("No response");
 
       const headLines = [`HTTP/1.1 ${res.status} ${res.statusText || "OK"}`];
       if (res.headers && typeof res.headers.forEach === "function") {
@@ -1039,7 +1085,7 @@ class VirtualHttpConnection {
           }
         });
       }
-      headLines.push(`x-golinux-fetched-url: ${res.url || this.reqMeta.url}`);
+      headLines.push(`x-golinux-fetched-url: ${res.url || currentUrl}`);
       headLines.push("connection: close");
 
       this.headersSent = true;
@@ -1475,8 +1521,34 @@ export class SafeFetchNetworkAdapter {
         if (!ctype.toLowerCase().includes("application/dns-message")) {
           throw new Error("Unexpected DoH Content-Type: " + ctype);
         }
-        const ab = await res.arrayBuffer();
-        const bytes = new Uint8Array(ab);
+        const cl = res.headers && res.headers.get ? Number(res.headers.get("content-length")) : 0;
+        if (cl > this.limits.maxDnsUdpBytes) {
+          throw new Error("DoH Content-Length exceeds limit: " + cl);
+        }
+        let bytes;
+        if (res.body && typeof res.body.getReader === "function") {
+          const reader = res.body.getReader();
+          const parts = [];
+          let total = 0;
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value && value.byteLength) {
+              total += value.byteLength;
+              if (total > this.limits.maxDnsUdpBytes) {
+                try { await reader.cancel(); } catch (_) {}
+                throw new Error("DoH response stream exceeded limit");
+              }
+              parts.push(value);
+            }
+          }
+          bytes = new Uint8Array(total);
+          let off = 0;
+          for (const p of parts) { bytes.set(p, off); off += p.byteLength; }
+        } else {
+          const ab = await res.arrayBuffer();
+          bytes = new Uint8Array(ab);
+        }
         if (bytes.length < 12 || bytes.length > this.limits.maxDnsUdpBytes) {
           throw new Error("Invalid DoH payload length: " + bytes.length);
         }
