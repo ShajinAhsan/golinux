@@ -470,6 +470,32 @@ async function main() {
     adapter.destroy();
   }
 
+  /* ---- 9. Redirect SSRF to private IP is blocked (S-1) & NAT64 IPv6 blocked (B-10) ---- */
+  {
+    const bus = new MockBus();
+    let fetchCalls = 0;
+    const adapter = new SafeFetchNetworkAdapter(bus, {
+      enabled: true,
+      fetchImpl: async (url) => {
+        fetchCalls++;
+        if (url === "https://public.example.com/start") {
+          return new Response("", { status: 302, headers: { location: "http://127.0.0.1/admin" } });
+        }
+        return new Response("SHOULD_NOT_FETCH", { status: 200 });
+      },
+    });
+    const c = new GuestTcpClient(bus, mod, { sport: 40500 });
+    c.send({ syn: true });
+    c.drain();
+    c.send({ ack: true, psh: true }, enc.encode("GET /start HTTP/1.1\r\nHost: public.example.com\r\n\r\n"));
+    for (let i = 0; i < 12 && !c.gotFin; i++) { await sleep(5); c.drain(); }
+    check(fetchCalls === 1 && c.bodyText().includes("403 Forbidden"),
+      "redirect to 127.0.0.1 blocked before following (S-1)");
+    check(!mod.validateTargetUrl("http://[64:ff9b::127.0.0.1]/").ok,
+      "NAT64 IPv6 address blocked (B-10)");
+    adapter.destroy();
+  }
+
   await sleep(30);
   check(unhandled.length === 0, `zero unhandled promise rejections (got ${unhandled.length})`);
 
