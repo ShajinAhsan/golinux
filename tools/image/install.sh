@@ -6,19 +6,27 @@
 # final rootfs).
 set -eu
 
+NEXTGEN_SQUASHFS="${NEXTGEN_SQUASHFS:-0}"
+
 apk update
 
-# Configure mkinitfs features BEFORE installing linux-virt so initramfs-virt
-# includes ext4 + ata/ide/scsi/virtio drivers for /dev/sda and /dev/hvc0.
-mkdir -p /etc/mkinitfs
-cat > /etc/mkinitfs/mkinitfs.conf <<'EOF'
+KERNEL_PKGS="linux-virt"
+if [ "$NEXTGEN_SQUASHFS" = "1" ]; then
+  # Custom minimal Linux 6.12 kernel is built in Stage 0 with all drivers built-in (zero modules/initrd).
+  KERNEL_PKGS=""
+else
+  # Configure mkinitfs features BEFORE installing linux-virt so initramfs-virt
+  # includes ext4 + ata/ide/scsi/virtio drivers for /dev/sda and /dev/hvc0.
+  mkdir -p /etc/mkinitfs
+  cat > /etc/mkinitfs/mkinitfs.conf <<'EOF'
 features="ata base ide scsi virtio ext4"
 EOF
+fi
 
 # Ultra-lean Alpine + BusyBox + TinyCC + essential CLI tools
 apk add --no-cache \
   alpine-base \
-  linux-virt \
+  $KERNEL_PKGS \
   e2fsprogs \
   bash \
   bash-doc \
@@ -55,6 +63,40 @@ cat > /usr/local/bin/clear <<'CLREOF'
 printf '\033[H\033[2J\033[3J'
 CLREOF
 chmod +x /usr/local/bin/clear
+
+# Host clipboard bridge via OSC 52 (usage: echo hi | clip)
+cat > /usr/local/bin/clip <<'CLIPEOF'
+#!/bin/sh
+# Encode stdin (up to 128 KB) as OSC 52 clipboard escape sequence to /dev/tty.
+DATA="$(head -c 131072 | base64 | tr -d '\r\n')"
+if [ -n "$DATA" ]; then
+  printf '\033]52;c;%s\007' "$DATA" > /dev/tty 2>/dev/null || printf '\033]52;c;%s\007' "$DATA"
+fi
+CLIPEOF
+chmod +x /usr/local/bin/clip
+
+# PID-1 OverlayFS init wrapper for read-only SquashFS root (instant <20ms boot, 100% writable /)
+mkdir -p /run /run/ro
+cat > /sbin/init-overlay <<'OVLEOF'
+#!/bin/sh
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sysfs /sys 2>/dev/null || true
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mount -t tmpfs -o mode=0755,size=48M tmpfs /run
+mkdir -p /run/overlay/upper /run/overlay/work /run/overlay/merged /run/ro
+if mount -t overlay overlay -o lowerdir=/,upperdir=/run/overlay/upper,workdir=/run/overlay/work /run/overlay/merged 2>/dev/null; then
+  mkdir -p /run/overlay/merged/run/ro
+  if pivot_root /run/overlay/merged /run/overlay/merged/run/ro 2>/dev/null; then
+    cd /
+    mount --move /run/ro/proc /proc 2>/dev/null || true
+    mount --move /run/ro/sys /sys 2>/dev/null || true
+    mount --move /run/ro/dev /dev 2>/dev/null || true
+    mount --move /run/ro/run /run 2>/dev/null || true
+  fi
+fi
+exec /sbin/init "$@"
+OVLEOF
+chmod +x /sbin/init-overlay
 
 # Enable vibrant syntax highlighting in nano for popular languages
 # (all packed into a single hot b-core bundle for instant mobile startup)
@@ -278,7 +320,40 @@ EOF
 
 echo 'root:root' | chpasswd
 
-# Clean caches
+# Static MOTD & resolv.conf baked directly into rootfs (zero runtime writes)
+cat > /etc/motd <<'MOTDEOF'
+
+  GoLinux - Alpine Linux 3.21 (x86), running in your browser.
+
+  Tools: BusyBox, bash, tcc/cc (instant C), python3, git, make,
+         nano, vi, htop, tmux, jq, tree, man, fastfetch, cowsay, figlet, sl, clip.
+
+  Your files in /root auto-save locally in this browser.
+
+MOTDEOF
+printf '%s\n' 'nameserver 192.168.86.1' > /etc/resolv.conf
+
+# Prune heavy unused tests/docs/GUI libs/extra terminfo/symbols
 rm -rf /var/cache/apk/* /tmp/* /var/tmp/*
+rm -rf /usr/lib/python3.*/test /usr/lib/python3.*/unittest/test \
+       /usr/lib/python3.*/idlelib /usr/lib/python3.*/tkinter \
+       /usr/lib/python3.*/turtledemo /usr/lib/python3.*/ensurepip \
+       /usr/lib/python3.*/pydoc_data /usr/lib/python3.*/lib2to3 2>/dev/null || true
+rm -f /usr/libexec/git-core/git-svn /usr/libexec/git-core/git-p4 \
+      /usr/libexec/git-core/git-imap-send /usr/libexec/git-core/git-send-email \
+      /usr/libexec/git-core/git-cvs* /usr/libexec/git-core/git-archimport \
+      /usr/libexec/git-core/git-instweb 2>/dev/null || true
+if [ -d /usr/share/terminfo ]; then
+  find /usr/share/terminfo -type f \
+    ! -path '*/x/xterm*' ! -path '*/s/screen*' ! -path '*/t/tmux*' \
+    ! -path '*/v/vt100' ! -path '*/v/vt102' ! -path '*/l/linux' \
+    ! -path '*/d/dumb' ! -path '*/a/ansi' -delete 2>/dev/null || true
+fi
+if command -v strip >/dev/null 2>&1; then
+  strip --strip-unneeded /usr/local/bin/tcc 2>/dev/null || true
+fi
+if [ "$NEXTGEN_SQUASHFS" = "1" ]; then
+  rm -rf /boot/* /lib/modules/* 2>/dev/null || true
+fi
 
 echo "ROOTFS_BUILD_OK"
