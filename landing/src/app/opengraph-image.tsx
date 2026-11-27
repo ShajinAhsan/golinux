@@ -92,7 +92,7 @@ export default function OpenGraphImage() {
           }}
         >
           <span style={{ fontSize: "22px", color: "#6e6e73" }}>
-            &lt;1s snapshot wake · ~9 MB first load · MIT open source
+            &lt;1s snapshot wake · ~5.1 MB snapshot · MIT open source
           </span>
           <span style={{ fontSize: "26px", fontWeight: 700, color: "#1d1d1f" }}>
             golinux.app
