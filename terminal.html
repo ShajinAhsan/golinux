@@ -11,6 +11,8 @@
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" href="icons/icon-192.png" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://assets.golinux.app" crossorigin>
+<link rel="preload" as="fetch" href="bundles.json" crossorigin="anonymous">
 <link rel="stylesheet" href="assets/xterm/xterm.css">
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -51,6 +53,12 @@
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
         Tools
       </button>
+      <button id="paletteBtn" class="wide-only ghost-btn" title="Command Palette & Recipes (Ctrl+K)">
+        <span>⌘K</span>
+      </button>
+      <button id="settingsBtn" class="wide-only ghost-btn" title="Terminal settings (font size, themes, Zen mode, search)">
+        <span>Aa</span>
+      </button>
       <button id="saveBtn" class="wide-only ghost-btn" title="Auto-saves ~ (/root) ~350 ms after edits and on reload. Click to save immediately; files outside /root aren't saved.">
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
         Save
@@ -68,8 +76,11 @@
       <button id="mNet" role="menuitem" data-feature="network">Internet (Fetch): Off</button>
       <button id="mSave" role="menuitem">Save ~ (/root) now</button>
       <button id="mUpload" role="menuitem" data-feature="upload">Upload to ~ (/root)</button>
-      <button id="mDownload" role="menuitem" data-feature="download">Download files</button>
+      <button id="mDownload" role="menuitem" data-feature="download">Files &amp; Editor</button>
       <button id="mPacks" role="menuitem" data-feature="packs">Tools &amp; offline cache</button>
+      <button id="mPalette" role="menuitem">Command Palette (Ctrl+K)</button>
+      <button id="mSettings" role="menuitem">Appearance &amp; Search</button>
+      <button id="mInstall" role="menuitem" hidden>Install Offline App</button>
       <button id="mReset" role="menuitem" class="danger-item">Reset machine</button>
       <a id="mAbout" role="menuitem" href="about.html">About &amp; Licenses</a>
     </div>
@@ -102,8 +113,8 @@
 
   <div id="updateBanner" role="status" hidden>
     <span class="grow">A new GoLinux update is ready.</span>
-    <button id="updateBannerReload" onclick="try{sessionStorage.removeItem('gl_reloaded_for')}catch(e){}location.reload()">Reload now</button>
-    <button id="updateBannerDismiss" aria-label="Dismiss" onclick="this.parentElement.hidden=true;this.parentElement.classList.remove('visible')">Dismiss</button>
+    <button id="updateBannerReload" type="button">Reload now</button>
+    <button id="updateBannerDismiss" type="button" aria-label="Dismiss">Dismiss</button>
   </div>
 
   <div id="packs" role="dialog" aria-modal="true" aria-labelledby="packsTitle" data-feature="packs">
@@ -187,21 +198,102 @@
 
   <div id="filesModal" role="dialog" aria-modal="true" aria-labelledby="filesTitle" data-feature="download">
     <div id="filesBox" class="modal-box">
-      <h2 id="filesTitle">Download files</h2>
+      <h2 id="filesTitle">Files &amp; Quick Editor</h2>
       <p class="hint">
-        Files in <code>~</code> (<code>/root</code>) appear here automatically and auto-save across reloads.
-        Files over 10 MB or copied into <code>/mnt/host</code> appear as temporary transfers.
+        Files in <code>~</code> (<code>/root</code>) auto-save across reloads.
+        Edit text files directly, export everything as <code>.zip</code>, or download from <code>/mnt/host</code>.
       </p>
       <div id="filesList"></div>
+      <div id="fileEditorPane" hidden>
+        <div class="fe-head">
+          <code id="fileEditorName"></code>
+          <div class="fe-actions">
+            <button id="fileEditorBack" type="button" class="ghost-btn">Back</button>
+            <button id="fileEditorSave" type="button">Save to ~</button>
+          </div>
+        </div>
+        <textarea id="fileEditorText" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+      </div>
       <div id="filesStatus"></div>
       <div id="filesFooter">
-        <button id="refreshFiles" type="button">Refresh</button>
+        <div class="fe-actions">
+          <button id="refreshFiles" type="button">Refresh</button>
+          <button id="downloadZipBtn" type="button">Download ~.zip</button>
+        </div>
         <button id="closeFiles" type="button">Close</button>
       </div>
     </div>
   </div>
 
+  <div id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div id="settingsBox" class="modal-box">
+      <h2 id="settingsTitle">Terminal Settings</h2>
+      <div class="set-row">
+        <span>Font size <em id="settingsFontLabel">Auto</em></span>
+        <div class="fe-actions">
+          <button id="fontDecBtn" type="button" aria-label="Decrease font size">A-</button>
+          <button id="fontResetBtn" type="button">Auto</button>
+          <button id="fontIncBtn" type="button" aria-label="Increase font size">A+</button>
+        </div>
+      </div>
+      <div class="set-row">
+        <span>Color theme</span>
+        <div id="themeSwatches" class="bw-seg" role="group" aria-label="Color theme">
+          <button type="button" data-theme-id="obsidian" aria-pressed="true">Obsidian</button>
+          <button type="button" data-theme-id="solarized" aria-pressed="false">Solarized</button>
+          <button type="button" data-theme-id="light" aria-pressed="false">Light</button>
+          <button type="button" data-theme-id="retro" aria-pressed="false">Retro</button>
+        </div>
+      </div>
+      <div class="set-row">
+        <span>Utilities</span>
+        <div class="fe-actions">
+          <button id="openSearchBtn" type="button">Find in buffer</button>
+          <button id="exportTranscriptBtn" type="button">Export .txt</button>
+          <button id="settingsZenBtn" type="button" aria-pressed="false">Zen mode</button>
+        </div>
+      </div>
+      <div id="filesFooter">
+        <span class="hint-sm">Shortcuts: Ctrl+K palette · Ctrl+Shift+F find · Ctrl+=/- zoom · F11 zen</span>
+        <button id="closeSettings" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="paletteModal" role="dialog" aria-modal="true" aria-labelledby="paletteTitle">
+    <div id="paletteBox" class="modal-box">
+      <h2 id="paletteTitle" class="sr-only">Command Palette</h2>
+      <input id="paletteInput" type="search" placeholder="Search actions &amp; starter recipes…" autocomplete="off" spellcheck="false">
+      <div id="paletteList"></div>
+      <div id="filesFooter">
+        <span class="hint-sm">↑↓ navigate · Enter run/copy · Esc close</span>
+        <button id="closePalette" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="shareImportModal" role="dialog" aria-modal="true" aria-labelledby="shareTitle">
+    <div id="shareBox" class="modal-box">
+      <h2 id="shareTitle">Import shared file into ~?</h2>
+      <p class="hint">Target path: <code id="shareFileName"></code> (never auto-executes).</p>
+      <pre id="sharePreview"></pre>
+      <div id="filesFooter">
+        <button id="shareCancelBtn" type="button" class="ghost-btn">Cancel</button>
+        <button id="shareAcceptBtn" type="button">Save into ~</button>
+      </div>
+    </div>
+  </div>
+
   <main id="terminal">
+    <div id="dropOverlay" hidden>Drop files, folders, or .zip to upload into ~ (/root)</div>
+    <div id="searchBar" hidden>
+      <input id="searchInput" type="search" placeholder="Find in terminal…" autocomplete="off" spellcheck="false">
+      <span id="searchCount"></span>
+      <button id="searchPrev" type="button" aria-label="Previous match">↑</button>
+      <button id="searchNext" type="button" aria-label="Next match">↓</button>
+      <button id="searchClose" type="button" aria-label="Close search">✕</button>
+    </div>
+    <button id="zenExitBtn" type="button" hidden title="Exit Zen mode (F11)">Exit Zen</button>
     <div id="diskToast" aria-live="polite">
       <div class="dt-top">
         <span class="toast-dot" aria-hidden="true"></span>
@@ -222,6 +314,7 @@
       <div class="spin"></div>
       <div class="title" id="loadingTitle">Starting…</div>
       <div class="detail" id="loadingDetail"></div>
+      <button id="loadingRetry" type="button" hidden>Retry now</button>
     </div>
   </div>
 
@@ -229,6 +322,7 @@
     <div class="kb-row">
       <button data-act="ctrl" aria-pressed="false" aria-label="Control (one-shot)">Ctrl</button>
       <button data-act="alt" aria-pressed="false" aria-label="Alt (one-shot)">Alt</button>
+      <span id="kbLatchHint" hidden></span>
       <button data-act="esc" aria-label="Escape">Esc</button>
       <button data-act="tab" aria-label="Tab">Tab</button>
       <button data-act="keyboard" aria-label="Show or hide the keyboard">⌨</button>
@@ -243,6 +337,8 @@
       <button data-act="backspace" aria-label="Backspace">⌫</button>
     </div>
     <div class="kb-row kb-extra" hidden>
+      <button data-act="copy" aria-label="Copy selection">Copy</button>
+      <button data-act="paste" aria-label="Paste clipboard">Paste</button>
       <button data-sym="|">|</button>
       <button data-sym="/">/</button>
       <button data-sym="~">~</button>
@@ -251,7 +347,6 @@
       <button data-sym=":">:</button>
       <button data-sym="*">*</button>
       <button data-sym="$">$</button>
-      <button data-sym="x">x</button>
       <button data-sym="c">c</button>
       <button data-sym="z">z</button>
     </div>
@@ -272,26 +367,7 @@
   </div>
 </div>
 
-<script>
-if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
-  navigator.serviceWorker.addEventListener("controllerchange", function () {
-    if (window.__glUpgradeHandled) return;
-    window.__glUpgradeHandled = true;
-    var k = "gl_sw_rescue_" + (window.GL_VERSION || "old");
-    if (!window.__glBootStarted) {
-      try {
-        if (sessionStorage.getItem(k) !== "1") {
-          sessionStorage.setItem(k, "1");
-          location.reload();
-          return;
-        }
-      } catch (e) {}
-    }
-    var b = document.getElementById("updateBanner");
-    if (b) { b.hidden = false; b.classList.add("visible"); }
-  });
-}
-</script>
+<script src="js/sw-rescue.js"></script>
 <script src="packs-config.js"></script>
 <script src="packs.js"></script>
 <script src="persist.js"></script>
