@@ -13,11 +13,13 @@ Usage: python3 tools/dev/serve-two-origins.py [--no-cors] [--no-cache-headers]
 import argparse
 import http.server
 import os
+import posixpath
 import socketserver
 import sys
 import threading
+import urllib.parse
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+ROOT = os.path.realpath(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 # Only the files that belong on each origin in production.
 # App origin serves everything EXCEPT images/debian-chunks/, images/debian-bundles/, bundles/, and packs/ (which belong on R2).
@@ -61,9 +63,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def _serve(self, body):
-        path = self.path.split("?")[0].lstrip("/")
-        if path == "":
-            path = "index.html"
+        raw_path = urllib.parse.unquote(self.path.split("?")[0])
+        if "\x00" in raw_path:
+            self.send_error(400, "invalid path")
+            return
+        norm = posixpath.normpath("/" + raw_path).lstrip("/")
+        path = "index.html" if norm == "" else norm
         # Reject paths that belong to the other origin, as a real split would.
         if self.is_asset:
             if not any(path.startswith(p) for p in ASSET_PREFIXES):
@@ -73,8 +78,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if any(path.startswith(p) for p in APP_FORBIDDEN):
                 self.send_error(404, "not on this origin")
                 return
-        full = os.path.join(ROOT, path)
-        if not os.path.isfile(full):
+        full = os.path.realpath(os.path.join(ROOT, path))
+        if not (full == ROOT or full.startswith(ROOT + os.sep)) or not os.path.isfile(full):
             self.send_error(404)
             return
 
