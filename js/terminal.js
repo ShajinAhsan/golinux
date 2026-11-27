@@ -9,36 +9,209 @@
 export const MIN_COLS = 20;
 export const MIN_ROWS = 5;
 
-/** Curated vibrant dark ANSI palette (zero extra runtime CPU/RAM overhead). */
-export const TERMINAL_THEME = Object.freeze({
-  background: "#080b11",
-  foreground: "#e2e8f0",
-  cursor: "#34d399",
-  cursorAccent: "#080b11",
-  selectionBackground: "rgba(56, 189, 248, 0.26)",
-  black: "#1e293b",
-  red: "#f87171",
-  green: "#34d399",
-  yellow: "#fbbf24",
-  blue: "#60a5fa",
-  magenta: "#c084fc",
-  cyan: "#22d3ee",
-  white: "#e2e8f0",
-  brightBlack: "#64748b",
-  brightRed: "#fca5a5",
-  brightGreen: "#6ee7b7",
-  brightYellow: "#fde68a",
-  brightBlue: "#93c5fd",
-  brightMagenta: "#d8b4fe",
-  brightCyan: "#67e8f9",
-  brightWhite: "#f8fafc",
+/** Curated vibrant terminal themes (zero extra runtime CPU/RAM overhead). */
+export const TERMINAL_THEMES = Object.freeze({
+  obsidian: Object.freeze({
+    name: "Obsidian",
+    background: "#080b11",
+    foreground: "#e2e8f0",
+    cursor: "#34d399",
+    cursorAccent: "#080b11",
+    selectionBackground: "rgba(56, 189, 248, 0.26)",
+    black: "#1e293b",
+    red: "#f87171",
+    green: "#34d399",
+    yellow: "#fbbf24",
+    blue: "#60a5fa",
+    magenta: "#c084fc",
+    cyan: "#22d3ee",
+    white: "#e2e8f0",
+    brightBlack: "#64748b",
+    brightRed: "#fca5a5",
+    brightGreen: "#6ee7b7",
+    brightYellow: "#fde68a",
+    brightBlue: "#93c5fd",
+    brightMagenta: "#d8b4fe",
+    brightCyan: "#67e8f9",
+    brightWhite: "#f8fafc",
+  }),
+  solarized: Object.freeze({
+    name: "Solarized Dark",
+    background: "#002b36",
+    foreground: "#93a1a1",
+    cursor: "#2aa198",
+    cursorAccent: "#002b36",
+    selectionBackground: "rgba(42, 161, 152, 0.28)",
+    black: "#073642",
+    red: "#dc322f",
+    green: "#859900",
+    yellow: "#b58900",
+    blue: "#268bd2",
+    magenta: "#d33682",
+    cyan: "#2aa198",
+    white: "#eee8d5",
+    brightBlack: "#586e75",
+    brightRed: "#cb4b16",
+    brightGreen: "#859900",
+    brightYellow: "#b58900",
+    brightBlue: "#839496",
+    brightMagenta: "#6c71c4",
+    brightCyan: "#93a1a1",
+    brightWhite: "#fdf6e3",
+  }),
+  light: Object.freeze({
+    name: "Light Contrast",
+    background: "#f8fafc",
+    foreground: "#0f172a",
+    cursor: "#059669",
+    cursorAccent: "#f8fafc",
+    selectionBackground: "rgba(14, 165, 233, 0.22)",
+    black: "#0f172a",
+    red: "#dc2626",
+    green: "#059669",
+    yellow: "#d97706",
+    blue: "#2563eb",
+    magenta: "#9333ea",
+    cyan: "#0891b2",
+    white: "#475569",
+    brightBlack: "#64748b",
+    brightRed: "#ef4444",
+    brightGreen: "#10b981",
+    brightYellow: "#f59e0b",
+    brightBlue: "#3b82f6",
+    brightMagenta: "#a855f7",
+    brightCyan: "#06b6d4",
+    brightWhite: "#1e293b",
+  }),
+  retro: Object.freeze({
+    name: "Retro Phosphor",
+    background: "#050d07",
+    foreground: "#4ade80",
+    cursor: "#86efac",
+    cursorAccent: "#050d07",
+    selectionBackground: "rgba(74, 222, 128, 0.24)",
+    black: "#052e16",
+    red: "#f87171",
+    green: "#4ade80",
+    yellow: "#a3e635",
+    blue: "#34d399",
+    magenta: "#6ee7b7",
+    cyan: "#2dd4bf",
+    white: "#bbf7d0",
+    brightBlack: "#166534",
+    brightRed: "#fca5a5",
+    brightGreen: "#86efac",
+    brightYellow: "#d9f99d",
+    brightBlue: "#6ee7b7",
+    brightMagenta: "#a7f3d0",
+    brightCyan: "#5eead4",
+    brightWhite: "#ecfdf5",
+  }),
 });
+
+export const TERMINAL_THEME = TERMINAL_THEMES.obsidian;
+const OSC52_MAX_BYTES = 128 * 1024;
 
 let getEmulator = () => window.emulator;
 let appliedCols = 0;
 let appliedRows = 0;
 let resizeScheduled = false;
 let themedTerm = null;
+let fontSizeOverride = null;
+let activeThemeId = "obsidian";
+let onOsc52Copy = null;
+
+export function setOsc52Handler(fn) {
+  onOsc52Copy = typeof fn === "function" ? fn : null;
+}
+
+export function getTerminalThemeId() {
+  return activeThemeId;
+}
+
+export function setTerminalTheme(id) {
+  if (!TERMINAL_THEMES[id]) return activeThemeId;
+  activeThemeId = id;
+  if (typeof document !== "undefined" && document.documentElement) {
+    document.documentElement.setAttribute("data-theme", id);
+  }
+  const term = currentTerminal();
+  if (term && term.options) {
+    term.options.theme = TERMINAL_THEMES[id];
+  }
+  return activeThemeId;
+}
+
+/** Pure OSC 52 decoder (exported for unit tests). Payload format: "<sel>;<base64>" */
+export function decodeOsc52Payload(raw) {
+  if (typeof raw !== "string") return null;
+  const semi = raw.indexOf(";");
+  if (semi < 0) return null;
+  const b64 = raw.slice(semi + 1).trim();
+  if (!b64 || b64 === "?") return null;
+  if (b64.length > Math.ceil(OSC52_MAX_BYTES * 1.4)) return null;
+  try {
+    const bin = atob(b64);
+    if (bin.length > OSC52_MAX_BYTES) return null;
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  } catch (_) {
+    return null;
+  }
+}
+
+export function exportTranscript() {
+  const term = currentTerminal();
+  if (!term || !term.buffer || !term.buffer.active) return "";
+  const buf = term.buffer.active;
+  const lines = [];
+  for (let i = 0; i < buf.length; i++) {
+    const line = buf.getLine(i);
+    if (line) lines.push(line.translateToString(true));
+  }
+  while (lines.length && lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n") + (lines.length ? "\n" : "");
+}
+
+export function searchScrollback(query) {
+  const q = String(query || "").toLowerCase();
+  const term = currentTerminal();
+  if (!q || !term || !term.buffer || !term.buffer.active) return [];
+  const buf = term.buffer.active;
+  const matches = [];
+  for (let row = 0; row < buf.length; row++) {
+    const line = buf.getLine(row);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    const lower = text.toLowerCase();
+    let idx = lower.indexOf(q);
+    while (idx !== -1) {
+      matches.push({ row, col: idx, text });
+      idx = lower.indexOf(q, idx + q.length);
+      if (matches.length >= 500) return matches;
+    }
+  }
+  return matches;
+}
+
+export function scrollToBufferLine(row) {
+  const term = currentTerminal();
+  if (!term || typeof term.scrollToLine !== "function") return;
+  term.scrollToLine(Math.max(0, Number(row) || 0));
+}
+
+export function getFontSizeOverride() {
+  return fontSizeOverride;
+}
+
+export function setFontSizeOverride(px) {
+  const n = Number(px);
+  fontSizeOverride = Number.isFinite(n) && n >= 10 && n <= 24 ? Math.round(n) : null;
+  if (currentTerminal()) {
+    fitSoon({ nudgeRedraw: false });
+  }
+}
 
 export function setEmulatorGetter(fn) {
   getEmulator = fn;
@@ -109,11 +282,24 @@ function syncTerminalStyle(term) {
   if (!term || !term.options) return;
   if (themedTerm !== term) {
     themedTerm = term;
-    term.options.theme = TERMINAL_THEME;
+    term.options.theme = TERMINAL_THEMES[activeThemeId] || TERMINAL_THEME;
     term.options.fontFamily = 'ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace';
     term.options.lineHeight = 1.26;
     term.options.cursorBlink = true;
     term.options.cursorStyle = "bar";
+
+    if (term.parser && typeof term.parser.registerOscHandler === "function") {
+      term.parser.registerOscHandler(52, (data) => {
+        const text = decodeOsc52Payload(data);
+        if (text == null) return false;
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+          navigator.clipboard.writeText(text).then(() => {
+            if (onOsc52Copy) onOsc52Copy(text.length);
+          }).catch(() => {});
+        }
+        return true;
+      });
+    }
 
     const ta = term.textarea;
     if (ta) {
@@ -146,7 +332,7 @@ function syncTerminalStyle(term) {
       });
     }
   }
-  const want = window.innerWidth <= 480 ? 12 : 14;
+  const want = fontSizeOverride != null ? fontSizeOverride : (window.innerWidth <= 480 ? 12 : 14);
   if (term.options.fontSize !== want) {
     term.options.fontSize = want;
   }
@@ -175,7 +361,9 @@ function sendVirtioResizeNow(emu, cols, rows) {
   try {
     lastSentCols = cols;
     lastSentRows = rows;
-    emu.bus.send("virtio-console0-resize", [cols, rows]);
+    // v86's Nc.SendWindowSize packs [e[0], e[1]] into VIRTIO_CONSOLE_RESIZE,
+    // which Linux drivers/char/virtio_console.c reads as { __u16 rows, __u16 cols }.
+    emu.bus.send("virtio-console0-resize", [rows, cols]);
   } catch (e) { /* guest not ready yet */ }
 }
 
