@@ -53,14 +53,14 @@ const H2_CLASS =
 
 const HERO_STATS = [
   { value: "<1s", label: "snapshot wake" },
-  { value: "~9 MB", label: "first load" },
+  { value: "~5.1 MB", label: "VM snapshot" },
   { value: "MIT", label: "open source" },
 ] as const;
 
 const SPECS = [
   { value: "Alpine 3.21", label: "Linux 6.12 + musl" },
   { value: "128 MB", label: "Mobile-light RAM" },
-  { value: "1 GB", label: "Virtual ext4 disk" },
+  { value: "256 MB", label: "SquashFS + OverlayFS" },
   { value: "x86", label: "Real ELF binaries" },
 ] as const;
 
