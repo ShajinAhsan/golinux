@@ -67,7 +67,7 @@ export function setupPersistUI() {
         } catch (e) {}
       }
 
-      try { sessionStorage.removeItem("gl_reloaded_for"); } catch (e) {}
+      try { sessionStorage.removeItem("golinux.reloaded_for"); } catch (e) {}
       location.reload();
     };
   }
