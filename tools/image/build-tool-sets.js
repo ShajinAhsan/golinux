@@ -30,10 +30,11 @@ const { execFileSync } = require("node:child_process");
 const ROOT = path.join(__dirname, "..", "..");
 const { V86 } = require(path.join(ROOT, "assets/v86/libv86.js"));
 
-const CHUNK_SIZE = 128 * 1024;
+const CHUNK_SIZE = Number(process.env.CHUNK_SIZE_BYTES || (128 * 1024));
 const OUT = path.join(ROOT, "packs", "tools.json");
 const SNAPSHOT_ZST = path.join(ROOT, "images", "debian-state.bin.zst");
 const MEMORY_SIZE = 128 * 1024 * 1024;   // must match the snapshot
+const VGA_SIZE = Number(process.env.VGA_KB || (process.env.NEXTGEN_SQUASHFS === "1" ? 256 : 8192)) * 1024;
 
 // First-use commands per tool: what a user actually runs the first time.
 const TOOLS = {
@@ -211,6 +212,7 @@ function recordTool(tool, stateBuffer) {
       net_device: { type: "virtio" },
       preserve_mac_from_state_image: true,
       memory_size: MEMORY_SIZE,
+      vga_memory_size: VGA_SIZE,
       // Restore the exact state production boots from: same guest RAM, same
       // cold page cache, no boot-time chunk reads.
       initial_state: { buffer: stateBuffer.buffer.slice(
