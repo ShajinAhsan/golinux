@@ -33,12 +33,30 @@ let emptyChunkBytes = null;
 let chunkToBundle = null;      // Map<chunkName, { file, off, len }>
 let bundleToChunks = null;     // Map<file, Array<{ name, off, len }>>
 let bundleSizes = null;        // Map<file, number>
-const memChunks = new Map();   // fallback in-memory cache: chunkName -> ArrayBuffer
+const memChunks = new Map();   // fallback LRU cache: chunkName -> ArrayBuffer
+let memBytes = 0;
+const MEM_CHUNK_CAP_BYTES = 24 * 1024 * 1024;
 const inflight = new Map();    // file -> Promise<{ status, map? }>
 const inflightRange = new Map(); // chunkName -> Promise<{ status, buf? }>
 let installed = false;
 let reRegisterTimer = null;
 let fallbackBps = null;
+
+function setMemChunk(name, buf) {
+  if (!buf) return;
+  if (memChunks.has(name)) {
+    memBytes -= memChunks.get(name).byteLength;
+    memChunks.delete(name);
+  }
+  memChunks.set(name, buf);
+  memBytes += buf.byteLength;
+  while (memBytes > MEM_CHUNK_CAP_BYTES && memChunks.size > 0) {
+    const oldestKey = memChunks.keys().next().value;
+    const oldestVal = memChunks.get(oldestKey);
+    memChunks.delete(oldestKey);
+    memBytes -= oldestVal ? oldestVal.byteLength : 0;
+  }
+}
 
 function isSlowFallback() {
   const pref = (() => {
@@ -120,21 +138,24 @@ async function fetchBundleDirect(file) {
       const res = await fetch(url);
       if (!res.ok) return { status: res.status };
       const buf = await res.arrayBuffer();
+      const expectedSize = (bundleSizes && bundleSizes.get(file)) || 0;
+      if (expectedSize > 0 && buf.byteLength < expectedSize) {
+        return { status: 502 };
+      }
       const members = (bundleToChunks && bundleToChunks.get(file)) || [];
       const map = new Map();
-      // Cap in-memory fallback map to ~32 MB (~800 chunks) to stay mobile-safe.
-      if (memChunks.size > 800) memChunks.clear();
       for (const m of members) {
+        if (m.off + m.len > buf.byteLength) return { status: 502 };
         const slice = buf.slice(m.off, m.off + m.len);
         map.set(m.name, slice);
-        memChunks.set(m.name, slice);
       }
-      // Best-effort repopulate Cache API if available.
+      // Best-effort repopulate Cache API if available; only fall back to RAM LRU if Cache API fails.
+      let cachedToStorage = false;
       try {
         if (typeof caches !== "undefined") {
           const cache = await caches.open(GL_DATA_CACHE);
           const prefix = "/" + GL_CHUNK_PATH;
-          for (const [name, slice] of map) {
+          await Promise.all(Array.from(map, ([name, slice]) =>
             cache.put(
               new Request(location.origin + prefix + name, { method: "GET" }),
               new Response(slice.slice(0), {
@@ -144,10 +165,14 @@ async function fetchBundleDirect(file) {
                   "Content-Length": String(slice.byteLength),
                 },
               })
-            ).catch(() => {});
-          }
+            )
+          ));
+          cachedToStorage = true;
         }
       } catch (_) {}
+      if (!cachedToStorage) {
+        for (const [name, slice] of map) setMemChunk(name, slice);
+      }
       hideOfflineBanner();
       return { status: 200, map };
     } catch (e) {
@@ -179,12 +204,11 @@ async function fetchChunkRangeDirect(name, meta) {
       if (buf.byteLength > 0) fallbackBps = buf.byteLength / (dt / 1000);
 
       if (res.status === 206 && buf.byteLength === meta.len) {
-        if (memChunks.size > 800) memChunks.clear();
-        memChunks.set(name, buf);
+        let cachedToStorage = false;
         try {
           if (typeof caches !== "undefined") {
             const cache = await caches.open(GL_DATA_CACHE);
-            cache.put(
+            await cache.put(
               new Request(location.origin + "/" + GL_CHUNK_PATH + name, { method: "GET" }),
               new Response(buf.slice(0), {
                 status: 200,
@@ -193,20 +217,21 @@ async function fetchChunkRangeDirect(name, meta) {
                   "Content-Length": String(buf.byteLength),
                 },
               })
-            ).catch(() => {});
+            );
+            cachedToStorage = true;
           }
         } catch (_) {}
+        if (!cachedToStorage) setMemChunk(name, buf);
         hideOfflineBanner();
         return { status: 200, buf };
       }
 
       if (res.status === 200 && buf.byteLength >= meta.off + meta.len) {
         const members = (bundleToChunks && bundleToChunks.get(meta.file)) || [];
-        if (memChunks.size > 800) memChunks.clear();
         let wanted = null;
         for (const m of members) {
           const slice = buf.slice(m.off, m.off + m.len);
-          memChunks.set(m.name, slice);
+          setMemChunk(m.name, slice);
           if (m.name === name) wanted = slice;
         }
         hideOfflineBanner();
