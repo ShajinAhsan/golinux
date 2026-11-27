@@ -61,6 +61,7 @@ export function matchTool(names, toolSets) {
 }
 
 let toolSets = null;
+let chunkToTools = null; // Map<chunkName, Set<toolId>>
 let toolSetsInFlight = null;
 let activeTool = null;
 let toolTotal = 0;
@@ -78,6 +79,7 @@ export async function loadToolSets() {
       if (!r.ok) return null;
       const raw = await r.json();
       const sets = {};
+      const rev = new Map();
       for (const [id, v] of Object.entries(raw)) {
         if (!v || !Array.isArray(v.chunks)) continue;
         sets[id] = {
@@ -86,8 +88,14 @@ export async function loadToolSets() {
           names: new Set(v.chunks),
           list: v.chunks,
         };
+        for (const ch of v.chunks) {
+          let owners = rev.get(ch);
+          if (!owners) { owners = new Set(); rev.set(ch, owners); }
+          owners.add(id);
+        }
       }
       toolSets = sets;
+      chunkToTools = rev;
       return sets;
     } catch (e) {
       return null;
@@ -129,7 +137,7 @@ function pipelineNextToolChunks(toolId) {
     if (toolCounted.has(ch) || toolPipelined.has(ch)) continue;
     next.push(ch);
     toolPipelined.add(ch);
-    if (next.length >= 2) break;
+    if (next.length >= 4) break;
   }
   if (next.length) {
     navigator.serviceWorker.controller.postMessage({
