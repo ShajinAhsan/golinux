@@ -5,7 +5,8 @@
         "origins": [
           "https://golinux.app",
           "https://www.golinux.app",
-          "https://terminal.golinux.app"
+          "https://terminal.golinux.app",
+          "https://academy.golinux.app"
         ],
         "methods": ["GET", "HEAD"],
         "headers": ["Range", "If-None-Match", "If-Modified-Since"]
